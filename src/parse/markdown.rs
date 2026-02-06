@@ -13,6 +13,14 @@ pub(crate) struct ParsedNote {
     pub tasks: Vec<ParsedTask>,
 }
 
+type InlineExtraction = (
+    BTreeSet<Tag>,
+    BTreeSet<LinkTarget>,
+    Vec<Link>,
+    Vec<(String, String)>,
+    Vec<ParsedTask>,
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedTask {
     pub line: u32,
@@ -128,10 +136,8 @@ fn extract_tags_from_yaml_value(v: &serde_yaml::Value) -> BTreeSet<Tag> {
     match v {
         serde_yaml::Value::Sequence(seq) => {
             for item in seq {
-                if let Some(s) = item.as_str() {
-                    if let Some(tag) = normalize_tag(s) {
-                        out.insert(tag);
-                    }
+                if let Some(tag) = item.as_str().and_then(normalize_tag) {
+                    out.insert(tag);
                 }
             }
         }
@@ -151,17 +157,14 @@ fn extract_tags_from_yaml_value(v: &serde_yaml::Value) -> BTreeSet<Tag> {
 }
 
 fn extract_title(path: &VaultPath, fm: Option<&serde_yaml::Value>, body: &str) -> String {
-    if let Some(fm) = fm {
-        if let Some(map) = fm.as_mapping() {
-            if let Some(v) = map.get(serde_yaml::Value::String("title".into())) {
-                if let Some(s) = v.as_str() {
-                    let s = s.trim();
-                    if !s.is_empty() {
-                        return s.to_string();
-                    }
-                }
-            }
-        }
+    if let Some(title) = fm
+        .and_then(|v| v.as_mapping())
+        .and_then(|map| map.get(serde_yaml::Value::String("title".into())))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return title.to_string();
     }
 
     // First H1.
@@ -190,16 +193,7 @@ fn extract_title(path: &VaultPath, fm: Option<&serde_yaml::Value>, body: &str) -
         .to_string()
 }
 
-fn extract_inline_tags_links_fields(
-    body: &str,
-    body_start_line: u32,
-) -> (
-    BTreeSet<Tag>,
-    BTreeSet<LinkTarget>,
-    Vec<Link>,
-    Vec<(String, String)>,
-    Vec<ParsedTask>,
-) {
+fn extract_inline_tags_links_fields(body: &str, body_start_line: u32) -> InlineExtraction {
     let mut tags = BTreeSet::new();
     let mut links = BTreeSet::new();
     let mut link_occurrences = Vec::new();
@@ -854,15 +848,12 @@ mod tests {
     #[test]
     fn inline_fields_ignore_fenced_code_blocks() {
         let note = parse("a.md", "```\nstatus:: secret\n```\n\nstatus:: public\n");
-        assert!(
-            note.inline_fields
-                .contains(&("status".into(), "public".into()))
-        );
-        assert!(
-            !note
-                .inline_fields
-                .contains(&("status".into(), "secret".into()))
-        );
+        assert!(note
+            .inline_fields
+            .contains(&("status".into(), "public".into())));
+        assert!(!note
+            .inline_fields
+            .contains(&("status".into(), "secret".into())));
     }
 
     #[test]

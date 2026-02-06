@@ -60,7 +60,7 @@
         apps.default = self'.apps.searxng-mcp;
 
         devShells.default = pkgs.mkShell {
-          buildInputs = [rustToolchain pkgs.cacert];
+          buildInputs = [rustToolchain pkgs.cacert pkgs.sqlite];
 
           shellHook = ''
             export PS1="(env:searxng-mcp) $PS1"

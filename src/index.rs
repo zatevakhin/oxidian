@@ -3,15 +3,15 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use nucleo::{
-    Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
+    Matcher, Utf32Str,
 };
 
 use crate::fields::{
-    FieldMap, extract_top_level_frontmatter_fields, inline_value_to_field_value, merge_field,
-    normalize_field_key,
+    extract_top_level_frontmatter_fields, inline_value_to_field_value, merge_field,
+    normalize_field_key, FieldMap,
 };
-use crate::parse::{FrontmatterParse, parse_markdown_note};
+use crate::parse::{parse_markdown_note, FrontmatterParse};
 use crate::{BacklinksIndex, Error, Query, QueryHit, Result, Vault, VaultPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +348,20 @@ impl VaultIndex {
 
     pub fn build_graph(&self, _vault: &Vault) -> Result<crate::GraphIndex> {
         Ok(crate::graph::build_graph(self))
+    }
+
+    #[cfg(feature = "similarity")]
+    pub fn note_similarity_report(&self, vault: &Vault) -> Result<crate::NoteSimilarityReport> {
+        crate::similarity::note_similarity_report(self, vault)
+    }
+
+    #[cfg(feature = "similarity")]
+    pub fn note_similarity_for(
+        &self,
+        vault: &Vault,
+        source: &VaultPath,
+    ) -> Result<Vec<crate::NoteSimilarityHit>> {
+        crate::similarity::note_similarity_for(self, vault, source)
     }
 
     pub fn resolved_outgoing_internal_links(

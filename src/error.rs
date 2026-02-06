@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("notify error: {0}")]
     Notify(#[from] notify::Error),
+
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }
 
 impl Error {

@@ -1,7 +1,19 @@
 use std::path::{Path, PathBuf};
+#[cfg(feature = "similarity")]
+use std::sync::Once;
 
-use rusqlite::{Connection, OptionalExtension, params};
+#[cfg(feature = "similarity")]
+use rusqlite::ffi::sqlite3_auto_extension;
+use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(feature = "similarity")]
+use sqlite_vec::sqlite3_vec_init;
+#[cfg(feature = "similarity")]
+use tracing::{debug, info, trace, warn};
+#[cfg(feature = "similarity")]
+use zerocopy::AsBytes;
 
+#[cfg(feature = "similarity")]
+use crate::embeddings::{clean_markdown_for_embedding, hash_text, EmbeddingModel};
 use crate::{
     Error, FileKind, FrontmatterStatus, Link, LinkKind, LinkTarget, NoteMeta, Result, Subpath,
     TaskStatus, Vault, VaultIndex, VaultPath,
@@ -9,6 +21,17 @@ use crate::{
 
 pub struct SqliteIndexStore {
     conn: Connection,
+}
+
+#[cfg(feature = "similarity")]
+static VEC_INIT: Once = Once::new();
+
+#[cfg(feature = "similarity")]
+fn init_vec_extension() {
+    VEC_INIT.call_once(|| unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+        debug!("sqlite-vec extension registered");
+    });
 }
 
 impl SqliteIndexStore {
@@ -21,6 +44,8 @@ impl SqliteIndexStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
+        #[cfg(feature = "similarity")]
+        init_vec_extension();
         let conn = Connection::open(path).map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
         let mut this = Self { conn };
         this.init_schema()?;
@@ -47,6 +72,14 @@ impl SqliteIndexStore {
              DELETE FROM files;",
         )
         .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        #[cfg(feature = "similarity")]
+        {
+            tx.execute_batch(
+                "DELETE FROM note_embeddings;
+                 DELETE FROM note_embedding_meta;",
+            )
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        }
 
         for f in index.all_files() {
             Self::upsert_path_in_tx(vault, index, &tx, &f.path)?;
@@ -89,9 +122,125 @@ impl SqliteIndexStore {
             .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
         tx.execute("DELETE FROM files WHERE path=?1", params![p])
             .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        #[cfg(feature = "similarity")]
+        {
+            tx.execute("DELETE FROM note_embeddings WHERE path=?1", params![p])
+                .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+            tx.execute("DELETE FROM note_embedding_meta WHERE path=?1", params![p])
+                .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        }
         tx.commit()
             .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
         Ok(())
+    }
+
+    #[cfg(feature = "similarity")]
+    pub(crate) fn ensure_embeddings(
+        &mut self,
+        vault: &Vault,
+        index: &VaultIndex,
+        model: &EmbeddingModel,
+    ) -> Result<()> {
+        let existing = self.existing_embedding_paths()?;
+        let existing_set: std::collections::HashSet<VaultPath> = existing.into_iter().collect();
+        let current_set: std::collections::HashSet<VaultPath> =
+            index.notes_iter_paths().cloned().collect();
+        info!(
+            total_notes = current_set.len(),
+            existing_embeddings = existing_set.len(),
+            "embedding refresh start"
+        );
+
+        let mut removed = 0usize;
+        let mut up_to_date = 0usize;
+        let mut updated = 0usize;
+
+        for path in existing_set.difference(&current_set) {
+            trace!(path = path.as_str_lossy(), "removing embedding");
+            self.remove_embedding(path)?;
+            removed += 1;
+        }
+
+        for path in current_set.iter() {
+            trace!(path = path.as_str_lossy(), "processing embedding");
+            let abs = vault.to_abs(path);
+            let text = match std::fs::read_to_string(&abs) {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!(path = abs.display().to_string(), error = %err, "failed to read note for embedding");
+                    return Err(Error::io(&abs, err));
+                }
+            };
+            let cleaned = clean_markdown_for_embedding(&text);
+            let hash = hash_text(&cleaned);
+            let stored_hash = self.embedding_hash(path)?;
+            if stored_hash.as_deref() == Some(hash.as_str()) {
+                trace!(path = path.as_str_lossy(), "embedding up-to-date");
+                up_to_date += 1;
+                continue;
+            }
+            let embedding = match model.embed_text(&cleaned) {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!(path = path.as_str_lossy(), error = %err, "embedding failed");
+                    return Err(err);
+                }
+            };
+            self.upsert_embedding(path, &embedding, &hash)?;
+            trace!(path = path.as_str_lossy(), "embedding stored");
+            updated += 1;
+        }
+
+        info!(removed, up_to_date, updated, "embedding refresh complete");
+
+        Ok(())
+    }
+
+    #[cfg(feature = "similarity")]
+    pub fn embedding_for_path(&self, path: &VaultPath) -> Result<Option<Vec<f32>>> {
+        let p = path.as_str_lossy();
+        let bytes: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT embedding FROM note_embeddings WHERE path=?1",
+                params![p],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        Ok(Some(bytes_to_f32(&bytes)))
+    }
+
+    #[cfg(feature = "similarity")]
+    pub fn knn_for_embedding(
+        &self,
+        embedding_bytes: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(VaultPath, f32)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT path, distance FROM note_embeddings WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
+            )
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![embedding_bytes, limit as i64], |r| {
+                let path: String = r.get(0)?;
+                let distance: f32 = r.get(1)?;
+                Ok((path, distance))
+            })
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, distance) = row.map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+            let vp = VaultPath::try_from(Path::new(&path))?;
+            out.push((vp, distance));
+        }
+        Ok(out)
     }
 
     pub fn counts(&self) -> Result<(usize, usize, usize, usize, usize)> {
@@ -165,6 +314,27 @@ impl SqliteIndexStore {
                 ",
             )
             .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        debug!("sqlite base schema ready");
+
+        #[cfg(feature = "similarity")]
+        {
+            self.conn
+                .execute_batch(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS note_embeddings USING vec0(
+                       embedding float[384],
+                       path TEXT
+                     );
+
+                     CREATE TABLE IF NOT EXISTS note_embedding_meta(
+                       path TEXT PRIMARY KEY,
+                       content_hash TEXT NOT NULL,
+                       updated_at INTEGER NOT NULL
+                     );
+                     CREATE INDEX IF NOT EXISTS idx_note_embedding_meta_hash ON note_embedding_meta(content_hash);",
+                )
+                .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+            debug!("sqlite similarity schema ready");
+        }
 
         let schema_version: Option<String> = self
             .conn
@@ -185,6 +355,88 @@ impl SqliteIndexStore {
         }
 
         Ok(())
+    }
+
+    #[cfg(feature = "similarity")]
+    fn embedding_hash(&self, path: &VaultPath) -> Result<Option<String>> {
+        let p = path.as_str_lossy();
+        let hash: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT content_hash FROM note_embedding_meta WHERE path=?1",
+                params![p],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        Ok(hash)
+    }
+
+    #[cfg(feature = "similarity")]
+    fn upsert_embedding(&mut self, path: &VaultPath, embedding: &[f32], hash: &str) -> Result<()> {
+        let p = path.as_str_lossy();
+        let now = system_time_to_unix(std::time::SystemTime::now());
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+
+        tx.execute("DELETE FROM note_embeddings WHERE path=?1", params![p])
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO note_embeddings(path, embedding) VALUES(?1, ?2)",
+            params![p, embedding.as_bytes()],
+        )
+        .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO note_embedding_meta(path, content_hash, updated_at)
+             VALUES(?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, updated_at=excluded.updated_at",
+            params![p, hash, now],
+        )
+        .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+
+        tx.commit()
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "similarity")]
+    fn remove_embedding(&mut self, path: &VaultPath) -> Result<()> {
+        let p = path.as_str_lossy();
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        tx.execute("DELETE FROM note_embeddings WHERE path=?1", params![p])
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        tx.execute("DELETE FROM note_embedding_meta WHERE path=?1", params![p])
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "similarity")]
+    fn existing_embedding_paths(&self) -> Result<Vec<VaultPath>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM note_embedding_meta")
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                let path: String = r.get(0)?;
+                Ok(path)
+            })
+            .map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let path = row.map_err(|e| Error::InvalidVaultPath(e.to_string()))?;
+            if let Ok(vp) = VaultPath::try_from(Path::new(&path)) {
+                out.push(vp);
+            }
+        }
+        Ok(out)
     }
 
     fn upsert_path_in_tx(
@@ -346,4 +598,15 @@ fn system_time_to_unix(t: std::time::SystemTime) -> i64 {
     t.duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(feature = "similarity")]
+fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(chunk);
+        out.push(f32::from_le_bytes(arr));
+    }
+    out
 }

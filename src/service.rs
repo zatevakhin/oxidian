@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -131,6 +131,21 @@ impl VaultService {
     pub fn link_health_report(&self) -> crate::Result<crate::LinkHealthReport> {
         let snapshot = self.index_snapshot();
         snapshot.link_health_report(self.vault())
+    }
+
+    #[cfg(feature = "similarity")]
+    pub fn note_similarity_report(&self) -> crate::Result<crate::NoteSimilarityReport> {
+        let snapshot = self.index_snapshot();
+        snapshot.note_similarity_report(self.vault())
+    }
+
+    #[cfg(feature = "similarity")]
+    pub fn note_similarity_for(
+        &self,
+        source: &VaultPath,
+    ) -> crate::Result<Vec<crate::NoteSimilarityHit>> {
+        let snapshot = self.index_snapshot();
+        snapshot.note_similarity_for(self.vault(), source)
     }
 
     pub fn build_backlinks(&self) -> crate::Result<crate::BacklinksIndex> {
@@ -555,9 +570,6 @@ mod tests {
     }
 }
 
-fn to_vault_path(vault: &Vault, abs: &PathBuf) -> Option<VaultPath> {
-    match vault.to_rel(abs) {
-        Ok(rel) => Some(rel),
-        Err(_) => None,
-    }
+fn to_vault_path(vault: &Vault, abs: &Path) -> Option<VaultPath> {
+    vault.to_rel(abs).ok()
 }

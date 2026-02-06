@@ -28,10 +28,10 @@ pub struct Sort {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Predicate {
-    FieldExists { key: String },
-    FieldEq { key: String, value: FieldValue },
-    FieldContains { key: String, needle: String },
-    FieldCmp { key: String, op: CmpOp, rhs: f64 },
+    Exists { key: String },
+    Eq { key: String, value: FieldValue },
+    Contains { key: String, needle: String },
+    Cmp { key: String, op: CmpOp, rhs: f64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +124,7 @@ impl Query {
         let mut candidates: Vec<VaultPath> = if let Some(tag) = &self.tag {
             index.files_with_tag(tag).cloned().collect()
         } else {
-            index.notes_iter_paths().map(|p| p.clone()).collect()
+            index.notes_iter_paths().cloned().collect()
         };
 
         if let Some(prefix) = &self.path_prefix {
@@ -194,22 +194,18 @@ impl TaskQuery {
         let needle = self.contains.as_deref();
 
         for (path, note) in index.notes_iter() {
-            if let Some(prefix) = &self.path_prefix {
-                if !path.as_path().to_string_lossy().starts_with(prefix) {
-                    continue;
-                }
+            if let Some(prefix) = &self.path_prefix
+                && !path.as_path().to_string_lossy().starts_with(prefix)
+            {
+                continue;
             }
 
             for t in &note.tasks {
-                if let Some(st) = self.status {
-                    if t.status != st {
-                        continue;
-                    }
+                if let Some(st) = self.status && t.status != st {
+                    continue;
                 }
-                if let Some(n) = needle {
-                    if !t.text.contains(n) {
-                        continue;
-                    }
+                if let Some(n) = needle && !t.text.contains(n) {
+                    continue;
                 }
 
                 out.push(TaskHit {
@@ -243,7 +239,7 @@ impl FieldPredicateBuilder {
         let Some(k) = self.norm_key() else {
             return self.q;
         };
-        self.q.predicates.push(Predicate::FieldExists { key: k });
+        self.q.predicates.push(Predicate::Exists { key: k });
         self.q
     }
 
@@ -251,7 +247,7 @@ impl FieldPredicateBuilder {
         let Some(k) = self.norm_key() else {
             return self.q;
         };
-        self.q.predicates.push(Predicate::FieldEq {
+        self.q.predicates.push(Predicate::Eq {
             key: k,
             value: v.into(),
         });
@@ -262,7 +258,7 @@ impl FieldPredicateBuilder {
         let Some(k) = self.norm_key() else {
             return self.q;
         };
-        self.q.predicates.push(Predicate::FieldContains {
+        self.q.predicates.push(Predicate::Contains {
             key: k,
             needle: needle.into(),
         });
@@ -289,9 +285,7 @@ impl FieldPredicateBuilder {
         let Some(k) = self.norm_key() else {
             return self.q;
         };
-        self.q
-            .predicates
-            .push(Predicate::FieldCmp { key: k, op, rhs });
+        self.q.predicates.push(Predicate::Cmp { key: k, op, rhs });
         self.q
     }
 }
@@ -299,16 +293,16 @@ impl FieldPredicateBuilder {
 fn eval_predicate(pred: &Predicate, note: &crate::NoteMeta) -> bool {
     let fields = &note.fields;
     match pred {
-        Predicate::FieldExists { key } => fields.contains_key(key),
-        Predicate::FieldEq { key, value } => match fields.get(key) {
+        Predicate::Exists { key } => fields.contains_key(key),
+        Predicate::Eq { key, value } => match fields.get(key) {
             None => false,
             Some(v) => field_eq(v, value),
         },
-        Predicate::FieldContains { key, needle } => match fields.get(key) {
+        Predicate::Contains { key, needle } => match fields.get(key) {
             None => false,
             Some(v) => field_contains(v, needle),
         },
-        Predicate::FieldCmp { key, op, rhs } => match fields.get(key) {
+        Predicate::Cmp { key, op, rhs } => match fields.get(key) {
             None => false,
             Some(FieldValue::Number(n)) => cmp_num(*n, *rhs, *op),
             Some(FieldValue::List(items)) => items.iter().any(|it| match it {

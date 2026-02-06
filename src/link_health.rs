@@ -206,7 +206,11 @@ fn parse_block_id(line: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    if id.is_empty() { None } else { Some(id) }
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
 }
 
 fn slugify(s: &str) -> String {
@@ -217,11 +221,12 @@ fn slugify(s: &str) -> String {
         if c.is_ascii_alphanumeric() {
             out.push(c);
             last_dash = false;
-        } else if c.is_whitespace() || matches!(c, '-' | '_' | '/') {
-            if !out.is_empty() && !last_dash {
-                out.push('-');
-                last_dash = true;
-            }
+        } else if (c.is_whitespace() || matches!(c, '-' | '_' | '/'))
+            && !out.is_empty()
+            && !last_dash
+        {
+            out.push('-');
+            last_dash = true;
         }
     }
     while out.ends_with('-') {

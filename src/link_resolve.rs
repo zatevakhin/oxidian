@@ -264,7 +264,7 @@ fn pick_shortest_or_ambiguous(mut candidates: Vec<VaultPath>) -> ResolveResult {
 
 fn has_extension(path: &str) -> bool {
     path.rsplit_once('.')
-        .map_or(false, |(_, ext)| !ext.is_empty())
+        .is_some_and(|(_, ext)| !ext.is_empty())
 }
 
 fn percent_decode(s: &str) -> Option<String> {

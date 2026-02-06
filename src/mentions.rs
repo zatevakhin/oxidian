@@ -149,19 +149,24 @@ fn strip_link_spans(line: &str) -> String {
     let mut i = 0usize;
     while i < bytes.len() {
         // wiki link or embed
-        if bytes[i] == b'[' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            if let Some(end) = find_bytes(bytes, i + 2, b']', b']') {
-                out.push(' ');
-                i = end + 2;
-                continue;
-            }
+        if bytes[i] == b'['
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'['
+            && let Some(end) = find_bytes(bytes, i + 2, b']', b']')
+        {
+            out.push(' ');
+            i = end + 2;
+            continue;
         }
-        if bytes[i] == b'!' && i + 2 < bytes.len() && bytes[i + 1] == b'[' && bytes[i + 2] == b'[' {
-            if let Some(end) = find_bytes(bytes, i + 3, b']', b']') {
-                out.push(' ');
-                i = end + 2;
-                continue;
-            }
+        if bytes[i] == b'!'
+            && i + 2 < bytes.len()
+            && bytes[i + 1] == b'['
+            && bytes[i + 2] == b'['
+            && let Some(end) = find_bytes(bytes, i + 3, b']', b']')
+        {
+            out.push(' ');
+            i = end + 2;
+            continue;
         }
 
         // markdown link or embed: [text](target) or ![alt](target)
@@ -169,23 +174,25 @@ fn strip_link_spans(line: &str) -> String {
             let start = if bytes[i] == b'!' { i + 1 } else { i };
             if let Some(close_br) = bytes[start + 1..].iter().position(|b| *b == b']') {
                 let j = start + 1 + close_br;
-                if j + 1 < bytes.len() && bytes[j + 1] == b'(' {
-                    if let Some(close_paren) = bytes[j + 2..].iter().position(|b| *b == b')') {
-                        out.push(' ');
-                        i = j + 2 + close_paren + 1;
-                        continue;
-                    }
+                if j + 1 < bytes.len()
+                    && bytes[j + 1] == b'('
+                    && let Some(close_paren) =
+                        bytes[j + 2..].iter().position(|b| *b == b')')
+                {
+                    out.push(' ');
+                    i = j + 2 + close_paren + 1;
+                    continue;
                 }
             }
         }
 
         // autolink <...>
-        if bytes[i] == b'<' {
-            if let Some(off) = bytes[i + 1..].iter().position(|b| *b == b'>') {
-                out.push(' ');
-                i = i + 1 + off + 1;
-                continue;
-            }
+        if bytes[i] == b'<'
+            && let Some(off) = bytes[i + 1..].iter().position(|b| *b == b'>')
+        {
+            out.push(' ');
+            i = i + 1 + off + 1;
+            continue;
         }
 
         out.push(bytes[i] as char);
