@@ -3,15 +3,15 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use nucleo::{
-    pattern::{CaseMatching, Normalization, Pattern},
     Matcher, Utf32Str,
+    pattern::{CaseMatching, Normalization, Pattern},
 };
 
 use crate::fields::{
-    extract_top_level_frontmatter_fields, inline_value_to_field_value, merge_field,
-    normalize_field_key, FieldMap,
+    FieldMap, extract_top_level_frontmatter_fields, inline_value_to_field_value, merge_field,
+    normalize_field_key,
 };
-use crate::parse::{parse_markdown_note, FrontmatterParse};
+use crate::parse::{FrontmatterParse, parse_markdown_note};
 use crate::{BacklinksIndex, Error, Query, QueryHit, Result, Vault, VaultPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

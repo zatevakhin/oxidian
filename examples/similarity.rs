@@ -89,5 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(not(feature = "similarity"))]
 fn main() {
-    eprintln!("example requires the similarity feature: cargo run -p oxidian --example similarity --features similarity");
+    eprintln!(
+        "example requires the similarity feature: cargo run -p oxidian --example similarity --features similarity"
+    );
 }

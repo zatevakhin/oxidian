@@ -8,8 +8,8 @@ use tokenizers::Tokenizer;
 use tracing::{debug, info};
 use tract_onnx::prelude::tract_ndarray as ndarray;
 use tract_onnx::prelude::{
-    tvec, DatumType, Framework, InferenceFact, InferenceModelExt, Tensor, TypedModel,
-    TypedRunnableModel,
+    DatumType, Framework, InferenceFact, InferenceModelExt, Tensor, TypedModel, TypedRunnableModel,
+    tvec,
 };
 
 use crate::{Error, Result, Vault};
@@ -362,10 +362,6 @@ trait IfEmptyThen {
 
 impl IfEmptyThen for str {
     fn if_empty_then<'a>(&'a self, fallback: &'a str) -> &'a str {
-        if self.is_empty() {
-            fallback
-        } else {
-            self
-        }
+        if self.is_empty() { fallback } else { self }
     }
 }

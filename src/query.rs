@@ -201,10 +201,14 @@ impl TaskQuery {
             }
 
             for t in &note.tasks {
-                if let Some(st) = self.status && t.status != st {
+                if let Some(st) = self.status
+                    && t.status != st
+                {
                     continue;
                 }
-                if let Some(n) = needle && !t.text.contains(n) {
+                if let Some(n) = needle
+                    && !t.text.contains(n)
+                {
                     continue;
                 }
 

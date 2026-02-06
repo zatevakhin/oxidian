@@ -176,8 +176,7 @@ fn strip_link_spans(line: &str) -> String {
                 let j = start + 1 + close_br;
                 if j + 1 < bytes.len()
                     && bytes[j + 1] == b'('
-                    && let Some(close_paren) =
-                        bytes[j + 2..].iter().position(|b| *b == b')')
+                    && let Some(close_paren) = bytes[j + 2..].iter().position(|b| *b == b')')
                 {
                     out.push(' ');
                     i = j + 2 + close_paren + 1;

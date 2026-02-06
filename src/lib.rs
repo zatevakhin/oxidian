@@ -1,12 +1,10 @@
 mod config;
+#[cfg(feature = "similarity")]
+mod embeddings;
 mod error;
 mod fields;
 mod graph;
 mod index;
-#[cfg(feature = "similarity")]
-mod embeddings;
-#[cfg(feature = "similarity")]
-mod similarity;
 mod link_health;
 mod link_resolve;
 mod links;
@@ -14,6 +12,8 @@ mod mentions;
 mod parse;
 mod query;
 mod service;
+#[cfg(feature = "similarity")]
+mod similarity;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 mod vault;

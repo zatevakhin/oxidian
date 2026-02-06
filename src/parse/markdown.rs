@@ -848,12 +848,15 @@ mod tests {
     #[test]
     fn inline_fields_ignore_fenced_code_blocks() {
         let note = parse("a.md", "```\nstatus:: secret\n```\n\nstatus:: public\n");
-        assert!(note
-            .inline_fields
-            .contains(&("status".into(), "public".into())));
-        assert!(!note
-            .inline_fields
-            .contains(&("status".into(), "secret".into())));
+        assert!(
+            note.inline_fields
+                .contains(&("status".into(), "public".into()))
+        );
+        assert!(
+            !note
+                .inline_fields
+                .contains(&("status".into(), "secret".into()))
+        );
     }
 
     #[test]
