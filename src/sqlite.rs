@@ -4,7 +4,7 @@ use std::sync::Once;
 
 #[cfg(feature = "similarity")]
 use rusqlite::ffi::sqlite3_auto_extension;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 #[cfg(feature = "similarity")]
 use sqlite_vec::sqlite3_vec_init;
 #[cfg(feature = "similarity")]
@@ -13,7 +13,7 @@ use tracing::{debug, info, trace, warn};
 use zerocopy::AsBytes;
 
 #[cfg(feature = "similarity")]
-use crate::embeddings::{EmbeddingModel, clean_markdown_for_embedding, hash_text};
+use crate::embeddings::{clean_markdown_for_embedding, hash_text, EmbeddingModel};
 use crate::{
     Error, FileKind, FrontmatterStatus, Link, LinkKind, LinkTarget, NoteMeta, Result, Subpath,
     TaskStatus, Vault, VaultIndex, VaultPath,
@@ -56,7 +56,8 @@ impl SqliteIndexStore {
         vault
             .root()
             .join(".obsidian")
-            .join("system3-obsidian.sqlite")
+            .join("oxidian")
+            .join("oxidian.db")
     }
 
     pub fn write_full_index(&mut self, vault: &Vault, index: &VaultIndex) -> Result<()> {
