@@ -1,8 +1,11 @@
 use std::fs::File;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use lru::LruCache;
 use sha2::{Digest, Sha256};
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
@@ -18,6 +21,60 @@ pub(crate) struct EmbeddingModel {
     model: TypedRunnableModel<TypedModel>,
     tokenizer: Tokenizer,
     max_length: usize,
+}
+
+const EMBEDDING_MODEL_CACHE_CAP: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    root: PathBuf,
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    model_url: String,
+    tokenizer_url: String,
+    max_length: usize,
+}
+
+impl CacheKey {
+    fn for_vault(vault: &Vault) -> Result<Self> {
+        let cfg = vault.config();
+        let assets = EmbeddingAssets::for_vault(vault)?;
+        Ok(Self {
+            root: vault.root().to_path_buf(),
+            model_path: assets.model_path,
+            tokenizer_path: assets.tokenizer_path,
+            model_url: cfg.embedding_model_url.clone(),
+            tokenizer_url: cfg.embedding_tokenizer_url.clone(),
+            max_length: cfg.embedding_max_length.max(8),
+        })
+    }
+}
+
+fn model_cache() -> &'static Mutex<LruCache<CacheKey, Arc<EmbeddingModel>>> {
+    static CACHE: OnceLock<Mutex<LruCache<CacheKey, Arc<EmbeddingModel>>>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let cap = NonZeroUsize::new(EMBEDDING_MODEL_CACHE_CAP)
+            .unwrap_or_else(|| NonZeroUsize::new(1).expect("non-zero"));
+        Mutex::new(LruCache::new(cap))
+    })
+}
+
+fn cache_get_or_insert_with<V, F>(
+    cache: &mut LruCache<CacheKey, V>,
+    key: CacheKey,
+    loader: F,
+) -> Result<(V, bool)>
+where
+    V: Clone,
+    F: FnOnce() -> Result<V>,
+{
+    if let Some(v) = cache.get(&key) {
+        return Ok((v.clone(), true));
+    }
+
+    let v = loader()?;
+    cache.put(key, v.clone());
+    Ok((v, false))
 }
 
 impl EmbeddingModel {
@@ -66,6 +123,21 @@ impl EmbeddingModel {
             tokenizer,
             max_length,
         })
+    }
+
+    pub(crate) fn load_cached(vault: &Vault) -> Result<Arc<Self>> {
+        let key = CacheKey::for_vault(vault)?;
+        let root = key.root.display().to_string();
+        let mut cache = model_cache().lock().unwrap_or_else(|e| e.into_inner());
+        let (model, hit) = cache_get_or_insert_with(&mut cache, key, || {
+            Ok::<Arc<EmbeddingModel>, Error>(Arc::new(EmbeddingModel::load(vault)?))
+        })?;
+        if hit {
+            debug!(root, "embedding model cache hit");
+        } else {
+            debug!(root, "embedding model cache miss");
+        }
+        Ok(model)
     }
 
     pub(crate) fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
@@ -353,6 +425,62 @@ fn normalize_l2(v: &mut [f32]) {
     let norm = sum.sqrt();
     for x in v.iter_mut() {
         *x /= norm;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn key(root: &str, suffix: &str) -> CacheKey {
+        CacheKey {
+            root: PathBuf::from(root),
+            model_path: PathBuf::from(format!("{root}/model{suffix}.onnx")),
+            tokenizer_path: PathBuf::from(format!("{root}/tokenizer{suffix}.json")),
+            model_url: format!("https://example.com/model{suffix}.onnx"),
+            tokenizer_url: format!("https://example.com/tokenizer{suffix}.json"),
+            max_length: 128,
+        }
+    }
+
+    #[test]
+    fn cache_get_or_insert_runs_loader_once() {
+        let mut cache = LruCache::new(NonZeroUsize::new(2).expect("non-zero"));
+        let key = key("/vault", "a");
+        let calls = AtomicUsize::new(0);
+
+        let (v1, hit1) = cache_get_or_insert_with(&mut cache, key.clone(), || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<usize, Error>(42usize)
+        })
+        .expect("first insert");
+        assert!(!hit1);
+        assert_eq!(v1, 42);
+
+        let (v2, hit2) = cache_get_or_insert_with(&mut cache, key, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<usize, Error>(99usize)
+        })
+        .expect("second insert");
+        assert!(hit2);
+        assert_eq!(v2, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cache_eviction_respects_lru_capacity() {
+        let mut cache = LruCache::new(NonZeroUsize::new(1).expect("non-zero"));
+        let key_a = key("/vault", "a");
+        let key_b = key("/vault", "b");
+
+        let _ = cache_get_or_insert_with(&mut cache, key_a.clone(), || Ok::<usize, Error>(1usize))
+            .expect("insert a");
+        let _ = cache_get_or_insert_with(&mut cache, key_b.clone(), || Ok::<usize, Error>(2usize))
+            .expect("insert b");
+
+        assert!(!cache.contains(&key_a));
+        assert!(cache.contains(&key_b));
     }
 }
 

@@ -49,10 +49,10 @@ pub(crate) fn note_similarity_report(
         )));
     }
 
-    let model = EmbeddingModel::load(vault)?;
+    let model = EmbeddingModel::load_cached(vault)?;
     let mut store = SqliteIndexStore::open_default(vault)?;
     let embed_start = Instant::now();
-    store.ensure_embeddings(vault, index, &model)?;
+    store.ensure_embeddings(vault, index, model.as_ref())?;
     debug!(
         elapsed_ms = embed_start.elapsed().as_millis(),
         "note similarity embeddings ready"
@@ -132,10 +132,10 @@ pub(crate) fn note_similarity_for(
         min_score = cfg.similarity_min_score,
         "note similarity query start"
     );
-    let model = EmbeddingModel::load(vault)?;
+    let model = EmbeddingModel::load_cached(vault)?;
     let mut store = SqliteIndexStore::open_default(vault)?;
     let embed_start = Instant::now();
-    store.ensure_embeddings(vault, index, &model)?;
+    store.ensure_embeddings(vault, index, model.as_ref())?;
     debug!(
         elapsed_ms = embed_start.elapsed().as_millis(),
         "note similarity embeddings ready"
