@@ -1,3 +1,953 @@
-fn main() {
-    println!("Hello, world!");
+use std::path::{Path, PathBuf};
+
+use clap::{Parser, Subcommand, ValueEnum};
+use oxidian::{
+    FileKind, Link, LinkIssueReason, LinkKind, Query, SortDir, Tag, TaskQuery, TaskStatus, Vault,
+    VaultPath, VaultService,
+};
+
+#[cfg(feature = "similarity")]
+use oxidian::VaultConfig;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LinkKindArg {
+    Wiki,
+    Markdown,
+    Autourl,
+    ObsidianUri,
+}
+
+impl From<LinkKindArg> for LinkKind {
+    fn from(value: LinkKindArg) -> Self {
+        match value {
+            LinkKindArg::Wiki => LinkKind::Wiki,
+            LinkKindArg::Markdown => LinkKind::Markdown,
+            LinkKindArg::Autourl => LinkKind::AutoUrl,
+            LinkKindArg::ObsidianUri => LinkKind::ObsidianUri,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StatusArg {
+    Todo,
+    Done,
+    InProgress,
+    Cancelled,
+    Blocked,
+}
+
+impl From<StatusArg> for TaskStatus {
+    fn from(value: StatusArg) -> Self {
+        match value {
+            StatusArg::Todo => TaskStatus::Todo,
+            StatusArg::Done => TaskStatus::Done,
+            StatusArg::InProgress => TaskStatus::InProgress,
+            StatusArg::Cancelled => TaskStatus::Cancelled,
+            StatusArg::Blocked => TaskStatus::Blocked,
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "oxidian",
+    version,
+    about = "Obsidian vault indexing + query CLI"
+)]
+struct Cli {
+    /// Path to the Obsidian vault.
+    #[arg(long, env = "OBSIDIAN_VAULT", global = true)]
+    vault: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Reports and summaries.
+    Report {
+        #[command(subcommand)]
+        command: ReportCommand,
+    },
+    /// Fuzzy search by filename or note content.
+    Search {
+        #[command(subcommand)]
+        command: SearchCommand,
+    },
+    /// Dataview-like querying via typed API.
+    Query(QueryCommand),
+    /// Watch a vault and print indexing events.
+    Watch {
+        #[command(subcommand)]
+        command: WatchCommand,
+    },
+    /// Persist the index to SQLite and incrementally update.
+    Sqlite {
+        #[command(subcommand)]
+        command: SqliteCommand,
+    },
+    /// Note similarity neighbors.
+    Similarity {
+        #[command(subcommand)]
+        command: SimilarityCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReportCommand {
+    /// Print file/note/tag counts.
+    Stats {
+        /// Optional tag to query for matching files.
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Print tags with file counts.
+    Tags {
+        /// How many tags to print.
+        #[arg(long, default_value_t = 50)]
+        top: usize,
+    },
+    /// List indexed tasks.
+    Tasks {
+        /// Optional path prefix.
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Filter by status.
+        #[arg(long, value_enum)]
+        status: Option<StatusArg>,
+
+        /// Filter by substring on task text.
+        #[arg(long)]
+        contains: Option<String>,
+
+        /// Maximum number of tasks to print.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// List links and link occurrences.
+    Links {
+        /// Optional note path (relative to vault) to inspect.
+        #[arg(long)]
+        note: Option<PathBuf>,
+
+        /// Filter by link kind.
+        #[arg(long, value_enum)]
+        kind: Option<LinkKindArg>,
+
+        /// Only show embed links (e.g. ![[..]] or ![](..)).
+        #[arg(long)]
+        only_embeds: bool,
+    },
+    /// Show resolved inbound links (backlinks).
+    Backlinks {
+        /// Target note path (relative) or name to resolve.
+        #[arg(long)]
+        note: String,
+    },
+    /// Find plain-text (unlinked) mentions of a target note.
+    Mentions {
+        /// Target note path (relative to vault).
+        #[arg(long)]
+        note: PathBuf,
+
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Graph issues and outgoing links.
+    Graph {
+        /// Source note path (relative to vault) to show outgoing internal links.
+        #[arg(long)]
+        note: Option<PathBuf>,
+    },
+    /// Audit internal links for missing/ambiguous targets and missing subpaths.
+    LinkHealth {
+        /// Print broken links.
+        #[arg(long)]
+        show_broken: bool,
+    },
+    /// Audit frontmatter across the vault.
+    Frontmatter {
+        /// Print paths for notes without frontmatter.
+        #[arg(long)]
+        show_missing: bool,
+
+        /// Print paths for notes with broken frontmatter.
+        #[arg(long)]
+        show_broken: bool,
+    },
+    /// Full similarity report.
+    Similarity {
+        /// Minimum similarity score.
+        #[arg(long)]
+        min_score: Option<f32>,
+
+        /// Maximum neighbors per note.
+        #[arg(long)]
+        top_k: Option<usize>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SearchCommand {
+    /// Search by filename.
+    Files {
+        /// Query string.
+        #[arg(long)]
+        query: String,
+
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Search by note content.
+    Content {
+        /// Query string.
+        #[arg(long)]
+        query: String,
+
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct QueryCommand {
+    /// Limit results to paths with this prefix.
+    #[arg(long)]
+    prefix: Option<String>,
+
+    /// Limit results to notes with this tag.
+    #[arg(long)]
+    tag: Option<String>,
+
+    /// Require that a field exists (repeatable).
+    #[arg(long)]
+    exists: Vec<String>,
+
+    /// Field equals (repeatable): key=value.
+    #[arg(long)]
+    eq: Vec<String>,
+
+    /// Field contains substring (repeatable): key=value.
+    #[arg(long)]
+    contains: Vec<String>,
+
+    /// Field numeric greater-than (repeatable): key=value.
+    #[arg(long)]
+    gt: Vec<String>,
+
+    /// Sort by field name.
+    #[arg(long)]
+    sort_field: Option<String>,
+
+    /// Sort descending.
+    #[arg(long)]
+    desc: bool,
+
+    /// Maximum number of results.
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+}
+
+#[derive(Debug, Subcommand)]
+enum WatchCommand {
+    /// Stream indexing events.
+    Index,
+}
+
+#[derive(Debug, Subcommand)]
+enum SqliteCommand {
+    /// Persist the index to SQLite and incrementally update.
+    Persist {
+        /// Optional SQLite DB path.
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SimilarityCommand {
+    /// Similar notes for a specific note.
+    Neighbors {
+        /// Relative note path to list neighbors for.
+        #[arg(long)]
+        note: PathBuf,
+
+        /// Minimum similarity score.
+        #[arg(long)]
+        min_score: Option<f32>,
+
+        /// Maximum neighbors per note.
+        #[arg(long)]
+        top_k: Option<usize>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Report { command } => handle_report(cli.vault, command).await?,
+        Command::Search { command } => handle_search(cli.vault, command).await?,
+        Command::Query(command) => handle_query(cli.vault, command).await?,
+        Command::Watch { command } => handle_watch(cli.vault, command).await?,
+        Command::Sqlite { command } => handle_sqlite(cli.vault, command).await?,
+        Command::Similarity { command } => handle_similarity(cli.vault, command).await?,
+    }
+
+    Ok(())
+}
+
+async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow::Result<()> {
+    #[cfg(not(feature = "similarity"))]
+    let similarity_enabled = false;
+    #[cfg(feature = "similarity")]
+    let similarity_enabled = true;
+
+    let vault_path = require_vault(vault)?;
+    let vault = Vault::open(&vault_path)?;
+    let service = VaultService::new(vault)?;
+    service.build_index().await?;
+    let snapshot = service.index_snapshot();
+
+    match command {
+        ReportCommand::Stats { tag } => {
+            let file_count = snapshot.all_files().count();
+            let note_count = snapshot
+                .all_files()
+                .filter(|f| matches!(f.kind, FileKind::Markdown | FileKind::Canvas))
+                .count();
+            let tag_count = snapshot.all_tags().count();
+
+            println!("stats");
+            println!("  files: {file_count}");
+            println!("  notes: {note_count}");
+            println!("  tags: {tag_count}");
+
+            if let Some(tag) = tag {
+                let tag = normalize_tag_for_query(&tag)?;
+                println!("\nfiles with tag #{tag}:");
+                for p in snapshot.files_with_tag(&Tag(tag.clone())) {
+                    println!("- {}", p.as_str_lossy());
+                }
+            }
+        }
+        ReportCommand::Tags { top } => {
+            let mut rows: Vec<(Tag, usize)> = snapshot
+                .all_tags()
+                .cloned()
+                .map(|t| {
+                    let n = snapshot.files_with_tag(&t).count();
+                    (t, n)
+                })
+                .collect();
+
+            rows.sort_by(|(a_tag, a_n), (b_tag, b_n)| {
+                b_n.cmp(a_n).then_with(|| a_tag.0.cmp(&b_tag.0))
+            });
+
+            for (tag, n) in rows.into_iter().take(top) {
+                println!("{n}\t#{tag}", tag = tag.0);
+            }
+        }
+        ReportCommand::Tasks {
+            prefix,
+            status,
+            contains,
+            limit,
+        } => {
+            let mut q = TaskQuery::all();
+            if let Some(prefix) = prefix {
+                q = q.from_path_prefix(prefix);
+            }
+            if let Some(status) = status {
+                q = q.status(status.into());
+            }
+            if let Some(needle) = contains {
+                q = q.contains_text(needle);
+            }
+            q = q.limit(limit);
+
+            for hit in service.query_tasks(&q) {
+                println!(
+                    "{:?}\t{}:{}\t{}",
+                    hit.status,
+                    hit.path.as_str_lossy(),
+                    hit.line,
+                    hit.text
+                );
+            }
+        }
+        ReportCommand::Links {
+            note,
+            kind,
+            only_embeds,
+        } => {
+            if let Some(note) = note {
+                let rel = VaultPath::try_from(note.as_path())?;
+                let note = snapshot
+                    .note(&rel)
+                    .ok_or_else(|| anyhow::anyhow!("note not found: {}", rel.as_str_lossy()))?;
+
+                println!("note: {}", rel.as_str_lossy());
+                println!("summary");
+                println!("  unique_targets: {}", note.links.len());
+                println!("  occurrences: {}", note.link_occurrences.len());
+
+                if !note.links.is_empty() {
+                    println!("\nunique targets:");
+                    for t in &note.links {
+                        println!("- {t:?}");
+                    }
+                }
+
+                let kind_filter = kind.map(Into::into);
+                let occs = note
+                    .link_occurrences
+                    .iter()
+                    .filter(|l| kind_filter.as_ref().map_or(true, |k| &l.kind == k))
+                    .filter(|l| !only_embeds || l.embed);
+
+                println!("\noccurrences:");
+                for l in occs {
+                    print_occ(l);
+                }
+
+                return Ok(());
+            }
+
+            let mut total = 0usize;
+            let mut wiki = 0usize;
+            let mut md = 0usize;
+            let mut auto = 0usize;
+            let mut obs_uri = 0usize;
+            let mut embeds = 0usize;
+
+            for f in snapshot.all_files() {
+                let Some(note) = snapshot.note(&f.path) else {
+                    continue;
+                };
+                for l in &note.link_occurrences {
+                    total += 1;
+                    if l.embed {
+                        embeds += 1;
+                    }
+                    match l.kind {
+                        LinkKind::Wiki => wiki += 1,
+                        LinkKind::Markdown => md += 1,
+                        LinkKind::AutoUrl => auto += 1,
+                        LinkKind::ObsidianUri => obs_uri += 1,
+                    }
+                }
+            }
+
+            println!("occurrences");
+            println!("  total: {total}");
+            println!("  embeds: {embeds}");
+            println!("  wiki: {wiki}");
+            println!("  markdown: {md}");
+            println!("  auto-url: {auto}");
+            println!("  obsidian-uri: {obs_uri}");
+        }
+        ReportCommand::Backlinks { note } => {
+            let backlinks = service.build_backlinks()?;
+            let target: VaultPath = if note.contains('/') || note.contains('.') {
+                VaultPath::try_from(Path::new(&note))?
+            } else {
+                let needle = note.to_lowercase();
+                let mut matches = Vec::new();
+                for f in snapshot.all_files() {
+                    let Some(_note) = snapshot.note(&f.path) else {
+                        continue;
+                    };
+                    let Some(stem) = f.path.as_path().file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if stem.to_lowercase() == needle {
+                        matches.push(f.path.clone());
+                    }
+                }
+                matches.sort();
+                matches.dedup();
+                match matches.len() {
+                    0 => return Err(anyhow::anyhow!("could not resolve target: {}", note)),
+                    1 => matches.remove(0),
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "ambiguous target '{}': {:?}",
+                            note,
+                            matches
+                        ));
+                    }
+                }
+            };
+
+            println!("target: {}", target.as_str_lossy());
+            let items = backlinks.backlinks(&target);
+            println!("summary");
+            println!("  backlinks: {}", items.len());
+            for b in items {
+                println!(
+                    "- {}:{}\t{:?}\tembed={}\traw={:?}",
+                    b.source.as_str_lossy(),
+                    b.link.location.line,
+                    b.link.target,
+                    b.link.embed,
+                    b.link.raw
+                );
+            }
+
+            println!(
+                "  unresolved_internal_occurrences: {}",
+                backlinks.unresolved
+            );
+            println!("  ambiguous_internal_occurrences: {}", backlinks.ambiguous);
+        }
+        ReportCommand::Mentions { note, limit } => {
+            let target = VaultPath::try_from(note.as_path())?;
+            let mentions = service.unlinked_mentions(&target, limit).await?;
+            println!("summary");
+            println!("  mentions: {}", mentions.len());
+            for m in mentions {
+                println!(
+                    "- {}:{}\tterm={:?}\t{}",
+                    m.source.as_str_lossy(),
+                    m.line,
+                    m.term,
+                    m.line_text.trim()
+                );
+            }
+        }
+        ReportCommand::Graph { note } => {
+            let graph = service.build_graph()?;
+            println!("summary");
+            println!(
+                "  unresolved_internal_occurrences: {}",
+                graph.backlinks.unresolved
+            );
+            println!(
+                "  ambiguous_internal_occurrences: {}",
+                graph.backlinks.ambiguous
+            );
+            println!("  issue_count: {}", graph.issues.len());
+
+            if let Some(note) = note {
+                let source = VaultPath::try_from(note.as_path())?;
+                let outgoing = snapshot.resolved_outgoing_internal_links(&source);
+                println!("\nsource: {}", source.as_str_lossy());
+                for o in outgoing {
+                    match &o.resolution {
+                        oxidian::ResolveResult::Resolved(p) => {
+                            println!(
+                                "- {}:{}\tresolved\t{}\traw={:?}",
+                                o.source.as_str_lossy(),
+                                o.link.location.line,
+                                p.as_str_lossy(),
+                                o.link.raw
+                            );
+                        }
+                        oxidian::ResolveResult::Missing => {
+                            println!(
+                                "- {}:{}\tmissing\t{:?}\traw={:?}",
+                                o.source.as_str_lossy(),
+                                o.link.location.line,
+                                o.link.target,
+                                o.link.raw
+                            );
+                        }
+                        oxidian::ResolveResult::Ambiguous(cands) => {
+                            println!(
+                                "- {}:{}\tambiguous\t{:?}\tcandidates={:?}\traw={:?}",
+                                o.source.as_str_lossy(),
+                                o.link.location.line,
+                                o.link.target,
+                                cands,
+                                o.link.raw
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ReportCommand::LinkHealth { show_broken } => {
+            let report = service.link_health_report()?;
+            println!("summary");
+            println!(
+                "  internal_occurrences: {}",
+                report.total_internal_occurrences
+            );
+            println!("  ok: {}", report.ok);
+            println!("  broken: {}", report.broken.len());
+
+            if show_broken {
+                println!("\nbroken:");
+                for issue in &report.broken {
+                    let where_ = format!(
+                        "{}:{}",
+                        issue.source.as_str_lossy(),
+                        issue.link.location.line
+                    );
+                    match &issue.reason {
+                        LinkIssueReason::MissingTarget => {
+                            println!("- {where_}\tmissing\t{:?}", issue.link.target);
+                        }
+                        LinkIssueReason::AmbiguousTarget { candidates } => {
+                            println!(
+                                "- {where_}\tambiguous\t{:?}\tcandidates={:?}",
+                                issue.link.target, candidates
+                            );
+                        }
+                        LinkIssueReason::MissingHeading { heading } => {
+                            println!(
+                                "- {where_}\tmissing_heading\t{:?}\t#{}",
+                                issue.link.target, heading
+                            );
+                        }
+                        LinkIssueReason::MissingBlock { block } => {
+                            println!(
+                                "- {where_}\tmissing_block\t{:?}\t^{}",
+                                issue.link.target, block
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ReportCommand::Frontmatter {
+            show_missing,
+            show_broken,
+        } => {
+            let report = snapshot.frontmatter_report();
+            println!("summary");
+            println!("  notes_without_frontmatter: {}", report.none);
+            println!("  notes_with_frontmatter_valid: {}", report.valid);
+            println!("  notes_with_frontmatter_broken: {}", report.broken);
+
+            if show_missing {
+                println!("\nmissing:");
+                for p in snapshot.notes_without_frontmatter() {
+                    println!("- {}", p.as_str_lossy());
+                }
+            }
+
+            if show_broken {
+                println!("\nbroken:");
+                for (p, err) in snapshot.notes_with_broken_frontmatter() {
+                    println!("- {}\t{}", p.as_str_lossy(), err);
+                }
+            }
+        }
+        ReportCommand::Similarity { min_score, top_k } => {
+            if !similarity_enabled {
+                let _ = min_score;
+                let _ = top_k;
+                eprintln!("This command requires --features similarity");
+                return Ok(());
+            }
+
+            #[cfg(feature = "similarity")]
+            {
+                let mut cfg = VaultConfig::default();
+                if let Some(score) = min_score {
+                    cfg.similarity_min_score = score;
+                }
+                if let Some(top_k) = top_k {
+                    cfg.similarity_top_k = top_k;
+                }
+
+                let vault = Vault::with_config(&vault_path, cfg)?;
+                let service = VaultService::new(vault)?;
+                eprintln!("building index...");
+                service.build_index().await?;
+                eprintln!("index ready");
+
+                eprintln!("computing similarity report...");
+                let report = service.note_similarity_report()?;
+                eprintln!(
+                    "done: {} hits across {} notes",
+                    report.hits.len(),
+                    report.total_notes
+                );
+                println!("total_notes\t{}", report.total_notes);
+                println!("pairs_checked\t{}", report.pairs_checked);
+                for hit in report.hits {
+                    println!(
+                        "{:.3}\t{}\t{}",
+                        hit.score,
+                        hit.source.as_str_lossy(),
+                        hit.target.as_str_lossy()
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_search(vault: Option<PathBuf>, command: SearchCommand) -> anyhow::Result<()> {
+    let vault = Vault::open(require_vault(vault)?)?;
+    let service = VaultService::new(vault)?;
+    service.build_index().await?;
+
+    match command {
+        SearchCommand::Files { query, limit } => {
+            let hits = service.search_filenames_fuzzy(&query, limit);
+            for hit in hits {
+                println!("{}\t{}", hit.score, hit.path.as_str_lossy());
+            }
+        }
+        SearchCommand::Content { query, limit } => {
+            let hits = service.search_content_fuzzy(&query, limit).await?;
+            for hit in hits {
+                println!(
+                    "{}\t{}:{}\t{}",
+                    hit.score,
+                    hit.path.as_str_lossy(),
+                    hit.line,
+                    hit.line_text.trim()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_query(vault: Option<PathBuf>, command: QueryCommand) -> anyhow::Result<()> {
+    let vault = Vault::open(require_vault(vault)?)?;
+    let service = VaultService::new(vault)?;
+    service.build_index().await?;
+
+    let mut q = Query::notes();
+    if let Some(prefix) = command.prefix {
+        q = q.from_path_prefix(prefix);
+    }
+    if let Some(tag) = command.tag {
+        q = q.from_tag(tag);
+    }
+
+    for key in command.exists {
+        q = q.where_field(key).exists();
+    }
+    for kv in command.eq {
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        q = q.where_field(k).eq(v);
+    }
+    for kv in command.contains {
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        q = q.where_field(k).contains(v);
+    }
+    for kv in command.gt {
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        if let Ok(n) = v.trim().parse::<f64>() {
+            q = q.where_field(k).gt(n);
+        }
+    }
+
+    let dir = if command.desc {
+        SortDir::Desc
+    } else {
+        SortDir::Asc
+    };
+    if let Some(field) = command.sort_field {
+        q = q.sort_by_field(field, dir);
+    } else {
+        q = q.sort_by_path(dir);
+    }
+    q = q.limit(command.limit);
+
+    for hit in service.query(&q) {
+        println!("{}", hit.path.as_str_lossy());
+    }
+
+    Ok(())
+}
+
+async fn handle_watch(vault: Option<PathBuf>, command: WatchCommand) -> anyhow::Result<()> {
+    match command {
+        WatchCommand::Index => {
+            let vault = Vault::open(require_vault(vault)?)?;
+            let mut service = VaultService::new(vault)?;
+            service.build_index().await?;
+            let mut rx = service.subscribe();
+
+            service.start_watching().await?;
+            println!("watching... (Ctrl-C to stop)");
+
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    ev = rx.recv() => {
+                        match ev {
+                            Ok(ev) => println!("{ev:?}"),
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                eprintln!("(lagged {n} events)");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+
+            service.shutdown().await;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_sqlite(vault: Option<PathBuf>, command: SqliteCommand) -> anyhow::Result<()> {
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = vault;
+        let _ = command;
+        eprintln!("This command requires --features sqlite");
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    {
+        use oxidian::{SqliteIndexStore, VaultEvent};
+
+        match command {
+            SqliteCommand::Persist { db } => {
+                let vault = Vault::open(require_vault(vault)?)?;
+                let mut service = VaultService::new(vault)?;
+                service.build_index().await?;
+
+                let mut store = match db {
+                    Some(p) => SqliteIndexStore::open_path(p)?,
+                    None => SqliteIndexStore::open_default(service.vault())?,
+                };
+                store.write_full_index(service.vault(), &service.index_snapshot())?;
+                let (files, notes, tags, tasks, links) = store.counts()?;
+                println!(
+                    "persisted: files={files} notes={notes} tags={tags} tasks={tasks} links={links}"
+                );
+
+                let mut rx = service.subscribe();
+                service.start_watching().await?;
+                println!("watching... (Ctrl-C to stop)");
+
+                loop {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => break,
+                        ev = rx.recv() => {
+                            let Ok(ev) = ev else { continue; };
+                            match ev {
+                                VaultEvent::Indexed { path, .. } => {
+                                    let snap = service.index_snapshot();
+                                    store.upsert_path(service.vault(), &snap, &path)?;
+                                }
+                                VaultEvent::Removed { path, .. } => {
+                                    store.remove_path(&path)?;
+                                }
+                                VaultEvent::Renamed { from, to, .. } => {
+                                    store.remove_path(&from)?;
+                                    let snap = service.index_snapshot();
+                                    store.upsert_path(service.vault(), &snap, &to)?;
+                                }
+                                VaultEvent::Error { .. } => {}
+                            }
+                        }
+                    }
+                }
+
+                service.shutdown().await;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+async fn handle_similarity(
+    vault: Option<PathBuf>,
+    command: SimilarityCommand,
+) -> anyhow::Result<()> {
+    #[cfg(not(feature = "similarity"))]
+    {
+        let _ = vault;
+        let _ = command;
+        eprintln!("This command requires --features similarity");
+        Ok(())
+    }
+
+    #[cfg(feature = "similarity")]
+    {
+        let mut cfg = VaultConfig::default();
+        let (min_score, top_k) = match &command {
+            SimilarityCommand::Neighbors {
+                min_score, top_k, ..
+            } => (*min_score, *top_k),
+        };
+        if let Some(score) = min_score {
+            cfg.similarity_min_score = score;
+        }
+        if let Some(top_k) = top_k {
+            cfg.similarity_top_k = top_k;
+        }
+
+        let vault = Vault::with_config(require_vault(vault)?, cfg)?;
+        let service = VaultService::new(vault)?;
+        eprintln!("building index...");
+        service.build_index().await?;
+        eprintln!("index ready");
+
+        match command {
+            SimilarityCommand::Neighbors { note, .. } => {
+                let note_path = VaultPath::try_from(note.as_path())?;
+                eprintln!("computing similarity for {}...", note_path.as_str_lossy());
+                let hits = service.note_similarity_for(&note_path)?;
+                eprintln!("done: {} hits", hits.len());
+                for hit in hits {
+                    println!(
+                        "{:.3}\t{}\t{}",
+                        hit.score,
+                        hit.source.as_str_lossy(),
+                        hit.target.as_str_lossy()
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn normalize_tag_for_query(raw: &str) -> anyhow::Result<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        anyhow::bail!("tag is empty");
+    }
+    let s = s.strip_prefix('#').unwrap_or(s);
+    let s = s.trim_matches('/').trim();
+    if s.is_empty() {
+        anyhow::bail!("tag is empty");
+    }
+    Ok(s.to_lowercase())
+}
+
+fn require_vault(vault: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    vault.ok_or_else(|| anyhow::anyhow!("--vault is required (or set OBSIDIAN_VAULT)"))
+}
+
+fn print_occ(l: &Link) {
+    println!(
+        "- {:?}\tembed={}\t{}:{}\ttarget={:?}\tsubpath={:?}\tdisplay={:?}\traw={:?}",
+        l.kind, l.embed, l.location.line, l.location.column, l.target, l.subpath, l.display, l.raw
+    );
 }
