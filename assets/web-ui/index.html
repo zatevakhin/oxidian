@@ -97,6 +97,32 @@
         margin: 0;
       }
 
+      .range {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .range input[type="range"] {
+        width: 110px;
+      }
+
+      .range input[type="number"] {
+        width: 54px;
+        background: transparent;
+        color: var(--text);
+        border: none;
+        font-size: 13px;
+        font-family: inherit;
+        outline: none;
+      }
+
       .toggle input {
         accent-color: var(--accent);
       }
@@ -156,6 +182,20 @@
           <label id="force-toggle" class="toggle" style="display: none">
             <input id="toggle-force-auto" type="checkbox" />
             auto-run forceatlas2
+          </label>
+          <label id="cluster-toggle" class="toggle" style="display: none">
+            <input id="toggle-cluster" type="checkbox" />
+            cluster by similarity
+          </label>
+          <label id="min-score-wrap" class="range" style="display: none">
+            min score
+            <input id="min-score" type="range" min="0" max="1" step="0.05" />
+            <input id="min-score-value" type="number" min="0" max="1" step="0.05" />
+          </label>
+          <label id="top-k-wrap" class="range" style="display: none">
+            top k
+            <input id="top-k" type="range" min="1" max="20" step="1" />
+            <input id="top-k-value" type="number" min="1" max="20" step="1" />
           </label>
           <label class="toggle">
             <input id="toggle-tags" type="checkbox" checked />

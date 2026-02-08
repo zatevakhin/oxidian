@@ -140,6 +140,15 @@ impl VaultService {
     }
 
     #[cfg(feature = "similarity")]
+    pub fn note_similarity_report_with_settings(
+        &self,
+        settings: crate::SimilaritySettings,
+    ) -> crate::Result<crate::NoteSimilarityReport> {
+        let snapshot = self.index_snapshot();
+        snapshot.note_similarity_report_with_settings(self.vault(), settings)
+    }
+
+    #[cfg(feature = "similarity")]
     pub fn note_similarity_for(
         &self,
         source: &VaultPath,

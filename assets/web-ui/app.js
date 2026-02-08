@@ -12,8 +12,18 @@
   const layoutSelect = document.getElementById("layout-select");
   const forceToggle = document.getElementById("force-toggle");
   const toggleForceAuto = document.getElementById("toggle-force-auto");
+  const clusterToggle = document.getElementById("cluster-toggle");
+  const toggleCluster = document.getElementById("toggle-cluster");
+  const minScoreWrap = document.getElementById("min-score-wrap");
+  const minScore = document.getElementById("min-score");
+  const minScoreValue = document.getElementById("min-score-value");
+  const topKWrap = document.getElementById("top-k-wrap");
+  const topK = document.getElementById("top-k");
+  const topKValue = document.getElementById("top-k-value");
   let currentLayout = "static";
   let layoutDirty = false;
+  let socket = null;
+  let similarityAvailable = false;
 
   const nodeColors = {
     markdown: "#6dd4ff",
@@ -69,6 +79,54 @@
     return nodeColors[kind] || nodeColors.other;
   }
 
+  function clusterColor(clusterId) {
+    const hue = (clusterId * 47) % 360;
+    return hslToHex(hue, 0.62, 0.62);
+  }
+
+  function hslToHex(h, s, l) {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = l - c / 2;
+    let r = 0;
+    let g = 0;
+    let b = 0;
+
+    if (h < 60) {
+      r = c;
+      g = x;
+    } else if (h < 120) {
+      r = x;
+      g = c;
+    } else if (h < 180) {
+      g = c;
+      b = x;
+    } else if (h < 240) {
+      g = x;
+      b = c;
+    } else if (h < 300) {
+      r = x;
+      b = c;
+    } else {
+      r = c;
+      b = x;
+    }
+
+    const toHex = (value) => {
+      const v = Math.round((value + m) * 255);
+      return v.toString(16).padStart(2, "0");
+    };
+
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+
+  function effectiveNodeColor(node) {
+    if (toggleCluster.checked && node.cluster_id != null && node.kind !== "tag") {
+      return clusterColor(node.cluster_id);
+    }
+    return nodeColor(node.kind);
+  }
+
   function applyGraph(payload) {
     graph.clear();
 
@@ -79,7 +137,7 @@
       graph.addNode(node.id, {
         label: node.label,
         size: Math.max(2, node.size || 1),
-        color: nodeColor(node.kind),
+        color: effectiveNodeColor(node),
         x: pos.x,
         y: pos.y,
       });
@@ -196,6 +254,33 @@
     }
   }
 
+  function updateSimilarityUi(payload) {
+    similarityAvailable = Boolean(payload.similarity && payload.similarity.available);
+    const enabled = similarityAvailable && payload.similarity.enabled;
+    clusterToggle.style.display = similarityAvailable ? "inline-flex" : "none";
+    minScoreWrap.style.display = similarityAvailable ? "inline-flex" : "none";
+    topKWrap.style.display = similarityAvailable ? "inline-flex" : "none";
+    toggleCluster.checked = enabled;
+    minScore.value = payload.similarity.min_score;
+    minScoreValue.value = payload.similarity.min_score;
+    topK.value = payload.similarity.top_k;
+    topKValue.value = payload.similarity.top_k;
+  }
+
+  function sendSimilaritySettings() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(
+      JSON.stringify({
+        type: "similarity_settings",
+        enabled: toggleCluster.checked,
+        min_score: parseFloat(minScoreValue.value),
+        top_k: parseInt(topKValue.value, 10),
+      }),
+    );
+  }
+
   function syncPositionsFromGraph() {
     for (const id of graph.nodes()) {
       const x = graph.getNodeAttribute(id, "x");
@@ -297,12 +382,13 @@
 
   function connect() {
     const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
+    socket = new WebSocket(`${protocol}://${location.host}/ws`);
 
     setStatus("connecting", "connecting");
 
     socket.addEventListener("open", () => {
       setStatus("connected", "connected");
+      sendSimilaritySettings();
     });
 
     socket.addEventListener("close", () => {
@@ -313,6 +399,7 @@
     socket.addEventListener("message", (event) => {
       try {
         const payload = JSON.parse(event.data);
+        updateSimilarityUi(payload);
         lastPayload = payload;
         const showTags = toggleTags.checked;
         applyGraph(filterPayload(payload, showTags));
@@ -359,6 +446,46 @@
     });
     forceToggle.style.display =
       currentLayout === "forceatlas2" ? "inline-flex" : "none";
+
+    const storedCluster = localStorage.getItem("oxidian.clusterEnabled");
+    toggleCluster.checked = storedCluster === "true";
+    toggleCluster.addEventListener("change", () => {
+      localStorage.setItem("oxidian.clusterEnabled", String(toggleCluster.checked));
+      if (lastPayload) {
+        applyGraph(filterPayload(lastPayload, toggleTags.checked));
+      }
+      sendSimilaritySettings();
+    });
+
+    const storedMinScore = localStorage.getItem("oxidian.minScore");
+    const storedTopK = localStorage.getItem("oxidian.topK");
+    minScore.value = storedMinScore || "0.6";
+    minScoreValue.value = minScore.value;
+    topK.value = storedTopK || "8";
+    topKValue.value = topK.value;
+
+    minScore.addEventListener("input", () => {
+      minScoreValue.value = minScore.value;
+    });
+    minScoreValue.addEventListener("change", () => {
+      minScore.value = minScoreValue.value;
+    });
+    topK.addEventListener("input", () => {
+      topKValue.value = topK.value;
+    });
+    topKValue.addEventListener("change", () => {
+      topK.value = topKValue.value;
+    });
+
+    const handleSimilarityChange = () => {
+      localStorage.setItem("oxidian.minScore", String(minScore.value));
+      localStorage.setItem("oxidian.topK", String(topK.value));
+      sendSimilaritySettings();
+    };
+    minScore.addEventListener("change", handleSimilarityChange);
+    minScoreValue.addEventListener("change", handleSimilarityChange);
+    topK.addEventListener("change", handleSimilarityChange);
+    topKValue.addEventListener("change", handleSimilarityChange);
 
     connect();
   });

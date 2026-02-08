@@ -356,6 +356,15 @@ impl VaultIndex {
     }
 
     #[cfg(feature = "similarity")]
+    pub fn note_similarity_report_with_settings(
+        &self,
+        vault: &Vault,
+        settings: crate::SimilaritySettings,
+    ) -> Result<crate::NoteSimilarityReport> {
+        crate::similarity::note_similarity_report_with_settings(self, vault, settings)
+    }
+
+    #[cfg(feature = "similarity")]
     pub fn note_similarity_for(
         &self,
         vault: &Vault,

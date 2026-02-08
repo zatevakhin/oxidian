@@ -35,7 +35,7 @@ pub use crate::mentions::UnlinkedMention;
 pub use crate::query::{CmpOp, Query, QueryHit, SortDir, SortKey, TaskHit, TaskQuery};
 pub use crate::service::{ReindexCause, VaultEvent, VaultService, WatchKind};
 #[cfg(feature = "similarity")]
-pub use crate::similarity::{NoteSimilarityHit, NoteSimilarityReport};
+pub use crate::similarity::{NoteSimilarityHit, NoteSimilarityReport, SimilaritySettings};
 #[cfg(feature = "sqlite")]
 pub use crate::sqlite::SqliteIndexStore;
 pub use crate::vault::{Vault, VaultPath};

@@ -9,11 +9,13 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::header;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{info, warn};
 
 use oxidian::{FileKind, GraphIndex, Vault, VaultIndex, VaultPath, VaultService};
+#[cfg(feature = "similarity")]
+use oxidian::{NoteSimilarityHit, SimilaritySettings};
 
 const INDEX_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -21,15 +23,30 @@ const INDEX_HTML: &str = include_str!(concat!(
 ));
 const APP_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/web-ui/app.js"));
 
+const DEFAULT_SIMILARITY_MIN_SCORE: f32 = 0.6;
+const DEFAULT_SIMILARITY_TOP_K: usize = 8;
+
 #[derive(Clone)]
 struct AppState {
     service: Arc<Mutex<VaultService>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ClientMessage {
+    #[serde(rename = "similarity_settings")]
+    SimilaritySettings {
+        enabled: bool,
+        min_score: f32,
+        top_k: usize,
+    },
 }
 
 #[derive(Debug, Serialize)]
 struct GraphPayload {
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
+    similarity: SimilarityMeta,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,6 +55,8 @@ struct GraphNode {
     label: String,
     kind: String,
     size: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cluster_id: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +64,31 @@ struct GraphEdge {
     id: String,
     source: String,
     target: String,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+struct SimilarityMeta {
+    available: bool,
+    enabled: bool,
+    min_score: f32,
+    top_k: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimilarityConfig {
+    enabled: bool,
+    min_score: f32,
+    top_k: usize,
+}
+
+impl Default for SimilarityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_score: DEFAULT_SIMILARITY_MIN_SCORE,
+            top_k: DEFAULT_SIMILARITY_TOP_K,
+        }
+    }
 }
 
 pub async fn run(vault_path: PathBuf, bind: SocketAddr) -> anyhow::Result<()> {
@@ -96,7 +140,12 @@ async fn ws_loop(mut socket: WebSocket, state: AppState) {
         service.subscribe()
     };
 
-    if send_snapshot(&mut socket, &state).await.is_err() {
+    let mut similarity_settings = SimilarityConfig::default();
+
+    if send_snapshot(&mut socket, &state, similarity_settings)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -105,6 +154,14 @@ async fn ws_loop(mut socket: WebSocket, state: AppState) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(updated) = handle_client_message(&text) {
+                            similarity_settings = updated;
+                            if send_snapshot(&mut socket, &state, similarity_settings).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
                     Some(Ok(_)) => {},
                     Some(Err(_)) => break,
                 }
@@ -112,7 +169,7 @@ async fn ws_loop(mut socket: WebSocket, state: AppState) {
             event = events.recv() => {
                 match event {
                     Ok(_) => {
-                        if send_snapshot(&mut socket, &state).await.is_err() {
+                        if send_snapshot(&mut socket, &state, similarity_settings).await.is_err() {
                             break;
                         }
                     }
@@ -128,10 +185,39 @@ async fn ws_loop(mut socket: WebSocket, state: AppState) {
     info!("web ui client disconnected");
 }
 
-async fn send_snapshot(socket: &mut WebSocket, state: &AppState) -> Result<(), ()> {
+fn handle_client_message(text: &str) -> Option<SimilarityConfig> {
+    let message: ClientMessage = serde_json::from_str(text).ok()?;
+    match message {
+        ClientMessage::SimilaritySettings {
+            enabled,
+            min_score,
+            top_k,
+        } => Some(normalize_similarity_settings(SimilarityConfig {
+            enabled,
+            min_score,
+            top_k,
+        })),
+    }
+}
+
+fn normalize_similarity_settings(settings: SimilarityConfig) -> SimilarityConfig {
+    let min_score = settings.min_score.clamp(0.0, 1.0);
+    let top_k = settings.top_k.clamp(1, 50);
+    SimilarityConfig {
+        enabled: settings.enabled,
+        min_score,
+        top_k,
+    }
+}
+
+async fn send_snapshot(
+    socket: &mut WebSocket,
+    state: &AppState,
+    similarity_settings: SimilarityConfig,
+) -> Result<(), ()> {
     let payload = {
         let service = state.service.lock().await;
-        match graph_payload(&service) {
+        match graph_payload(&service, similarity_settings) {
             Ok(payload) => payload,
             Err(err) => {
                 warn!(error = %err, "failed to build graph payload");
@@ -151,13 +237,82 @@ async fn send_snapshot(socket: &mut WebSocket, state: &AppState) -> Result<(), (
     socket.send(Message::Text(text)).await.map_err(|_| ())
 }
 
-fn graph_payload(service: &VaultService) -> anyhow::Result<GraphPayload> {
+fn graph_payload(
+    service: &VaultService,
+    similarity_settings: SimilarityConfig,
+) -> anyhow::Result<GraphPayload> {
     let snapshot = service.index_snapshot();
     let graph = snapshot.build_graph(service.vault())?;
-    Ok(build_graph_payload(&snapshot, &graph))
+    let (cluster_ids, similarity_meta) =
+        similarity_cluster_ids(service, &snapshot, similarity_settings)?;
+    Ok(build_graph_payload(
+        &snapshot,
+        &graph,
+        cluster_ids.as_ref(),
+        similarity_meta,
+    ))
 }
 
-fn build_graph_payload(snapshot: &VaultIndex, graph: &GraphIndex) -> GraphPayload {
+fn similarity_meta(settings: SimilarityConfig) -> SimilarityMeta {
+    SimilarityMeta {
+        available: cfg!(feature = "similarity"),
+        enabled: cfg!(feature = "similarity") && settings.enabled,
+        min_score: settings.min_score,
+        top_k: settings.top_k,
+    }
+}
+
+fn similarity_cluster_ids(
+    service: &VaultService,
+    snapshot: &VaultIndex,
+    settings: SimilarityConfig,
+) -> anyhow::Result<(Option<BTreeMap<String, u32>>, SimilarityMeta)> {
+    let meta = similarity_meta(settings);
+    #[cfg(feature = "similarity")]
+    {
+        if !settings.enabled {
+            return Ok((None, meta));
+        }
+        let settings = SimilaritySettings {
+            min_score: settings.min_score,
+            top_k: settings.top_k,
+        };
+        let report = match service.note_similarity_report_with_settings(settings) {
+            Ok(report) => report,
+            Err(err) => {
+                warn!(error = %err, "failed to compute similarity clusters");
+                return Ok((
+                    None,
+                    SimilarityMeta {
+                        enabled: false,
+                        ..meta
+                    },
+                ));
+            }
+        };
+        let note_ids: Vec<String> = snapshot
+            .all_files()
+            .filter(|f| matches!(f.kind, FileKind::Markdown | FileKind::Canvas))
+            .map(|f| f.path.as_str_lossy().to_string())
+            .collect();
+        let clusters = cluster_ids_from_hits(&note_ids, &report.hits);
+        return Ok((Some(clusters), meta));
+    }
+    #[cfg(not(feature = "similarity"))]
+    {
+        let _ = service;
+        let _ = snapshot;
+        let _ = settings;
+        Ok((None, meta))
+    }
+}
+
+fn build_graph_payload(
+    snapshot: &VaultIndex,
+    graph: &GraphIndex,
+    clusters: Option<&BTreeMap<String, u32>>,
+    similarity: SimilarityMeta,
+) -> GraphPayload {
     let mut nodes: BTreeMap<String, GraphNode> = BTreeMap::new();
     let mut edges = Vec::new();
     let mut edge_keys: BTreeSet<String> = BTreeSet::new();
@@ -165,7 +320,7 @@ fn build_graph_payload(snapshot: &VaultIndex, graph: &GraphIndex) -> GraphPayloa
         if !matches!(file.kind, FileKind::Markdown | FileKind::Canvas) {
             continue;
         }
-        insert_node(snapshot, &file.path, &mut nodes);
+        insert_node(snapshot, &file.path, &mut nodes, clusters);
 
         if let Some(note) = snapshot.note(&file.path) {
             let note_id = file.path.as_str_lossy().to_string();
@@ -179,11 +334,11 @@ fn build_graph_payload(snapshot: &VaultIndex, graph: &GraphIndex) -> GraphPayloa
 
     for target in graph.backlinks.targets() {
         let target_id = target.as_str_lossy().to_string();
-        insert_node(snapshot, target, &mut nodes);
+        insert_node(snapshot, target, &mut nodes, clusters);
 
         for backlink in graph.backlinks.backlinks(target) {
             let source_id = backlink.source.as_str_lossy().to_string();
-            insert_node(snapshot, &backlink.source, &mut nodes);
+            insert_node(snapshot, &backlink.source, &mut nodes, clusters);
             insert_edge(&source_id, &target_id, "link", &mut edges, &mut edge_keys);
         }
     }
@@ -203,7 +358,11 @@ fn build_graph_payload(snapshot: &VaultIndex, graph: &GraphIndex) -> GraphPayloa
         })
         .collect();
 
-    GraphPayload { nodes, edges }
+    GraphPayload {
+        nodes,
+        edges,
+        similarity,
+    }
 }
 
 fn insert_edge(
@@ -223,7 +382,12 @@ fn insert_edge(
     }
 }
 
-fn insert_node(snapshot: &VaultIndex, path: &VaultPath, nodes: &mut BTreeMap<String, GraphNode>) {
+fn insert_node(
+    snapshot: &VaultIndex,
+    path: &VaultPath,
+    nodes: &mut BTreeMap<String, GraphNode>,
+    clusters: Option<&BTreeMap<String, u32>>,
+) {
     let id = path.as_str_lossy().to_string();
     if nodes.contains_key(&id) {
         return;
@@ -234,6 +398,7 @@ fn insert_node(snapshot: &VaultIndex, path: &VaultPath, nodes: &mut BTreeMap<Str
         .map(|meta| file_kind_label(meta.kind))
         .unwrap_or("other");
 
+    let cluster_id = clusters.and_then(|map| map.get(&id).copied());
     nodes.insert(
         id.clone(),
         GraphNode {
@@ -241,6 +406,7 @@ fn insert_node(snapshot: &VaultIndex, path: &VaultPath, nodes: &mut BTreeMap<Str
             label: id,
             kind: kind.to_string(),
             size: 1.0,
+            cluster_id,
         },
     );
 }
@@ -257,6 +423,7 @@ fn insert_tag_node(tag_id: &str, tag: &str, nodes: &mut BTreeMap<String, GraphNo
             label: format!("#{tag}"),
             kind: "tag".to_string(),
             size: 1.0,
+            cluster_id: None,
         },
     );
 }
@@ -268,6 +435,56 @@ fn file_kind_label(kind: FileKind) -> &'static str {
         FileKind::Attachment => "attachment",
         FileKind::Other => "other",
     }
+}
+
+#[cfg(feature = "similarity")]
+fn cluster_ids_from_hits(note_ids: &[String], hits: &[NoteSimilarityHit]) -> BTreeMap<String, u32> {
+    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for id in note_ids {
+        adjacency.entry(id.clone()).or_default();
+    }
+
+    for hit in hits {
+        let source = hit.source.as_str_lossy().to_string();
+        let target = hit.target.as_str_lossy().to_string();
+        if source == target {
+            continue;
+        }
+        if !adjacency.contains_key(&source) || !adjacency.contains_key(&target) {
+            continue;
+        }
+        adjacency
+            .entry(source.clone())
+            .or_default()
+            .insert(target.clone());
+        adjacency.entry(target).or_default().insert(source);
+    }
+
+    let mut cluster_ids: BTreeMap<String, u32> = BTreeMap::new();
+    let mut next_id = 1u32;
+
+    for id in note_ids {
+        if cluster_ids.contains_key(id) {
+            continue;
+        }
+        let mut stack = vec![id.clone()];
+        while let Some(current) = stack.pop() {
+            if cluster_ids.contains_key(&current) {
+                continue;
+            }
+            cluster_ids.insert(current.clone(), next_id);
+            if let Some(neighbors) = adjacency.get(&current) {
+                for neighbor in neighbors {
+                    if !cluster_ids.contains_key(neighbor) {
+                        stack.push(neighbor.clone());
+                    }
+                }
+            }
+        }
+        next_id += 1;
+    }
+
+    cluster_ids
 }
 
 #[cfg(test)]
@@ -288,7 +505,17 @@ mod tests {
 
         let snapshot = service.index_snapshot();
         let graph = snapshot.build_graph(service.vault()).expect("graph");
-        let payload = build_graph_payload(&snapshot, &graph);
+        let payload = build_graph_payload(
+            &snapshot,
+            &graph,
+            None,
+            SimilarityMeta {
+                available: false,
+                enabled: false,
+                min_score: DEFAULT_SIMILARITY_MIN_SCORE,
+                top_k: DEFAULT_SIMILARITY_TOP_K,
+            },
+        );
 
         assert_eq!(payload.nodes.len(), 3);
         assert_eq!(payload.edges.len(), 2);
@@ -310,5 +537,27 @@ mod tests {
                 .iter()
                 .any(|edge| edge.source == "alpha.md" && edge.target == "tag:tag-a")
         );
+    }
+
+    #[cfg(feature = "similarity")]
+    #[test]
+    fn clusters_group_connected_hits() {
+        let note_ids = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
+        let hits = vec![
+            NoteSimilarityHit {
+                source: VaultPath::try_from(std::path::Path::new("a.md")).expect("source"),
+                target: VaultPath::try_from(std::path::Path::new("b.md")).expect("target"),
+                score: 0.8,
+            },
+            NoteSimilarityHit {
+                source: VaultPath::try_from(std::path::Path::new("b.md")).expect("source"),
+                target: VaultPath::try_from(std::path::Path::new("a.md")).expect("target"),
+                score: 0.8,
+            },
+        ];
+
+        let clusters = cluster_ids_from_hits(&note_ids, &hits);
+        assert_eq!(clusters.get("a.md"), clusters.get("b.md"));
+        assert_ne!(clusters.get("a.md"), clusters.get("c.md"));
     }
 }

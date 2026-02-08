@@ -20,23 +20,53 @@ pub struct NoteSimilarityReport {
     pub hits: Vec<NoteSimilarityHit>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SimilaritySettings {
+    pub min_score: f32,
+    pub top_k: usize,
+}
+
 pub(crate) fn note_similarity_report(
     index: &VaultIndex,
     vault: &Vault,
 ) -> Result<NoteSimilarityReport> {
     let cfg = vault.config();
+    let settings = SimilaritySettings {
+        min_score: cfg.similarity_min_score,
+        top_k: cfg.similarity_top_k,
+    };
+    note_similarity_report_with_settings(index, vault, settings)
+}
+
+pub fn note_similarity_report_with_settings(
+    index: &VaultIndex,
+    vault: &Vault,
+    settings: SimilaritySettings,
+) -> Result<NoteSimilarityReport> {
+    let cfg = vault.config();
+    if !(0.0..=1.0).contains(&settings.min_score) {
+        return Err(Error::Embedding(format!(
+            "note similarity settings invalid min_score: {}",
+            settings.min_score
+        )));
+    }
+    if settings.top_k == 0 {
+        return Err(Error::Embedding(
+            "note similarity settings invalid top_k: must be > 0".to_string(),
+        ));
+    }
     let note_paths: Vec<VaultPath> = index.notes_iter_paths().cloned().collect();
     let start = Instant::now();
     info!(
         note_count = note_paths.len(),
-        top_k = cfg.similarity_top_k,
-        min_score = cfg.similarity_min_score,
+        top_k = settings.top_k,
+        min_score = settings.min_score,
         "note similarity report"
     );
     debug!(
         note_count = note_paths.len(),
-        top_k = cfg.similarity_top_k,
-        min_score = cfg.similarity_min_score,
+        top_k = settings.top_k,
+        min_score = settings.min_score,
         max_notes = cfg.similarity_max_notes,
         max_length = cfg.embedding_max_length,
         "note similarity report start"
@@ -71,7 +101,7 @@ pub(crate) fn note_similarity_report(
             Some(v) => v,
             None => continue,
         };
-        let candidates = store.knn_for_embedding(embedding.as_bytes(), cfg.similarity_top_k + 1)?;
+        let candidates = store.knn_for_embedding(embedding.as_bytes(), settings.top_k + 1)?;
         total_candidates += candidates.len();
         for (target, distance) in candidates {
             if &target == source {
@@ -79,7 +109,7 @@ pub(crate) fn note_similarity_report(
             }
             report.pairs_checked += 1;
             let score = distance_to_cosine(distance);
-            if score < cfg.similarity_min_score {
+            if score < settings.min_score {
                 continue;
             }
             report.hits.push(NoteSimilarityHit {
