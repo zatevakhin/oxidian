@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Oxdian Web UI</title>
+    <style>
+      :root {
+        --bg-1: #0c1320;
+        --bg-2: #121f31;
+        --panel: #122135;
+        --panel-2: #152840;
+        --line: #1f324d;
+        --text: #e8eef6;
+        --muted: #a3b1c6;
+        --accent: #6dd4ff;
+        --warn: #e4b766;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Cantarell", "Noto Sans", "Liberation Sans", "DejaVu Sans", system-ui, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(900px 500px at 20% -10%, #1a2a42 0%, transparent 60%),
+          radial-gradient(700px 500px at 90% 0%, #18263a 0%, transparent 65%),
+          linear-gradient(180deg, var(--bg-1), var(--bg-2));
+      }
+
+      #app {
+        padding: 20px 24px 24px;
+      }
+
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 18px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: linear-gradient(120deg, var(--panel), var(--panel-2));
+        box-shadow: 0 18px 40px rgba(8, 12, 20, 0.35);
+      }
+
+      .title {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .meta {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .select {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .select select {
+        background: transparent;
+        color: var(--text);
+        border: none;
+        font-size: 13px;
+        font-family: inherit;
+        outline: none;
+        padding: 0;
+        margin: 0;
+      }
+
+      .toggle input {
+        accent-color: var(--accent);
+      }
+
+      .pill {
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 13px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: var(--muted);
+      }
+
+      .pill[data-state="connected"] {
+        color: var(--accent);
+        border-color: rgba(109, 212, 255, 0.5);
+      }
+
+      .pill[data-state="disconnected"] {
+        color: var(--warn);
+        border-color: rgba(228, 183, 102, 0.6);
+      }
+
+      #graph {
+        margin-top: 18px;
+        height: calc(100vh - 170px);
+        min-height: 360px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: linear-gradient(160deg, #0f1a2a 0%, #0f1726 100%);
+        overflow: hidden;
+      }
+
+      @media (max-width: 720px) {
+        #graph {
+          height: calc(100vh - 210px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div class="title">Oxdian Graph</div>
+        <div class="meta">
+          <span id="status" class="pill" data-state="connecting">connecting</span>
+          <span id="counts" class="pill">nodes: 0 edges: 0</span>
+          <label class="select">
+            layout
+            <select id="layout-select">
+              <option value="static">static</option>
+              <option value="circle">circle</option>
+              <option value="random">random</option>
+              <option value="forceatlas2">forceatlas2</option>
+            </select>
+          </label>
+          <label id="force-toggle" class="toggle" style="display: none">
+            <input id="toggle-force-auto" type="checkbox" />
+            auto-run forceatlas2
+          </label>
+          <label class="toggle">
+            <input id="toggle-tags" type="checkbox" checked />
+            show tags
+          </label>
+        </div>
+      </header>
+      <div id="graph"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
+    <script type="module">
+      import forceAtlas2 from "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm";
+      window.forceAtlas2 = forceAtlas2;
+    </script>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,4 +1,8 @@
+#[cfg(feature = "web-ui")]
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "web-ui")]
+use std::sync::Once;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxidian::{
@@ -8,6 +12,9 @@ use oxidian::{
 
 #[cfg(feature = "similarity")]
 use oxidian::VaultConfig;
+
+#[cfg(feature = "web-ui")]
+mod web_ui;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LinkKindArg {
@@ -92,6 +99,14 @@ enum Command {
     Similarity {
         #[command(subcommand)]
         command: SimilarityCommand,
+    },
+    /// Serve a realtime graph UI over HTTP.
+    #[cfg(feature = "web-ui")]
+    #[command(name = "web-ui")]
+    WebUi {
+        /// Bind address for the web server.
+        #[arg(long, default_value = "127.0.0.1:7878")]
+        bind: SocketAddr,
     },
 }
 
@@ -299,6 +314,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Watch { command } => handle_watch(cli.vault, command).await?,
         Command::Sqlite { command } => handle_sqlite(cli.vault, command).await?,
         Command::Similarity { command } => handle_similarity(cli.vault, command).await?,
+        #[cfg(feature = "web-ui")]
+        Command::WebUi { bind } => handle_web_ui(cli.vault, bind).await?,
     }
 
     Ok(())
@@ -926,6 +943,23 @@ async fn handle_similarity(
 
         Ok(())
     }
+}
+
+#[cfg(feature = "web-ui")]
+async fn handle_web_ui(vault: Option<PathBuf>, bind: SocketAddr) -> anyhow::Result<()> {
+    init_web_ui_logging();
+    let vault_path = require_vault(vault)?;
+    web_ui::run(vault_path, bind).await
+}
+
+#[cfg(feature = "web-ui")]
+fn init_web_ui_logging() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .init();
+    });
 }
 
 fn normalize_tag_for_query(raw: &str) -> anyhow::Result<String> {

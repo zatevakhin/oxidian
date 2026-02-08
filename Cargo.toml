@@ -1,6 +1,6 @@
 [package]
 name = "oxidian"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [dependencies]
@@ -9,9 +9,11 @@ clap = { version = "4.5.49", features = ["derive", "env"] }
 nucleo = "0.5.0"
 notify = "8.2.0"
 serde = { version = "1", features = ["derive"] }
+axum = { version = "0.7", optional = true, features = ["ws"] }
 serde_yaml = "0.9"
 thiserror = "2"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 walkdir = "2.5"
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
@@ -40,7 +42,7 @@ similarity = [
     "dep:ureq",
     "dep:zerocopy",
 ]
+web-ui = ["dep:axum", "dep:serde_json", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 tempfile = "3"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
