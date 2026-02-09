@@ -352,8 +352,8 @@ fn build_graph_payload(
     let nodes = nodes
         .into_iter()
         .map(|(id, mut node)| {
-            let d = degree.get(&id).copied().unwrap_or(0);
-            node.size = 3.0 + d as f32;
+            let d = degree.get(&id).copied().unwrap_or(0) as f32;
+            node.size = 3.0 + d.sqrt() * 1.8;
             node
         })
         .collect();

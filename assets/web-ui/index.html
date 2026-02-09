@@ -177,6 +177,7 @@
               <option value="circle">circle</option>
               <option value="random">random</option>
               <option value="forceatlas2">forceatlas2</option>
+              <option value="forceatlas2-cluster">forceatlas2 clustered</option>
             </select>
           </label>
           <label id="force-toggle" class="toggle" style="display: none">
@@ -196,6 +197,10 @@
             top k
             <input id="top-k" type="range" min="1" max="20" step="1" />
             <input id="top-k-value" type="number" min="1" max="20" step="1" />
+          </label>
+          <label class="toggle">
+            <input id="toggle-labels" type="checkbox" />
+            hide labels
           </label>
           <label class="toggle">
             <input id="toggle-tags" type="checkbox" checked />

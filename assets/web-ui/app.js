@@ -9,6 +9,7 @@
   const positions = new Map();
   let lastPayload = null;
   const toggleTags = document.getElementById("toggle-tags");
+  const toggleLabels = document.getElementById("toggle-labels");
   const layoutSelect = document.getElementById("layout-select");
   const forceToggle = document.getElementById("force-toggle");
   const toggleForceAuto = document.getElementById("toggle-force-auto");
@@ -24,6 +25,8 @@
   let layoutDirty = false;
   let socket = null;
   let similarityAvailable = false;
+  let clusterMap = new Map();
+  let nodeKindMap = new Map();
 
   const nodeColors = {
     markdown: "#6dd4ff",
@@ -130,12 +133,22 @@
   function applyGraph(payload) {
     graph.clear();
 
+    clusterMap = new Map();
+    nodeKindMap = new Map();
+    for (const node of payload.nodes) {
+      nodeKindMap.set(node.id, node.kind);
+      if (node.cluster_id != null) {
+        clusterMap.set(node.id, node.cluster_id);
+      }
+    }
+
     for (const node of payload.nodes) {
       const pos = positions.get(node.id) || positionFor(node.id);
       positions.set(node.id, pos);
 
       graph.addNode(node.id, {
         label: node.label,
+        fullLabel: node.label,
         size: Math.max(2, node.size || 1),
         color: effectiveNodeColor(node),
         x: pos.x,
@@ -165,6 +178,9 @@
         zIndex: true,
         nodeReducer: (node, data) => {
           const out = { ...data };
+          if (toggleLabels.checked) {
+            out.label = "";
+          }
           if (hoveredNode) {
             if (node === hoveredNode) {
               out.color = highlightColors.node;
@@ -195,6 +211,7 @@
           return out;
         },
         hoverRenderer: (ctx, data, settings) => {
+          const label = data.fullLabel || data.label;
           const size = data.size || 1;
           ctx.beginPath();
           ctx.fillStyle = highlightColors.node;
@@ -204,7 +221,7 @@
           ctx.fill();
           ctx.stroke();
 
-          if (!data.label) {
+          if (!label) {
             return;
           }
 
@@ -213,7 +230,7 @@
           ctx.font = font;
           const paddingX = 8;
           const paddingY = 6;
-          const textWidth = ctx.measureText(data.label).width;
+          const textWidth = ctx.measureText(label).width;
           const boxWidth = textWidth + paddingX * 2;
           const boxHeight = fontSize + paddingY;
           const boxX = data.x + size + 4;
@@ -225,7 +242,7 @@
 
           ctx.fillStyle = highlightColors.label;
           ctx.textBaseline = "middle";
-          ctx.fillText(data.label, boxX + paddingX, data.y);
+          ctx.fillText(label, boxX + paddingX, data.y);
         },
       });
 
@@ -243,7 +260,11 @@
 
     countsEl.textContent = `nodes: ${payload.nodes.length} edges: ${payload.edges.length}`;
 
-    if (currentLayout === "forceatlas2" && toggleForceAuto.checked) {
+    if (
+      (currentLayout === "forceatlas2" ||
+        currentLayout === "forceatlas2-cluster") &&
+      toggleForceAuto.checked
+    ) {
       applyLayout(currentLayout);
       return;
     }
@@ -355,9 +376,101 @@
       }
 
       const settings = window.forceAtlas2.inferSettings(graph);
-      window.forceAtlas2.assign(graph, { iterations: 80, settings });
+      window.forceAtlas2.assign(graph, {
+        iterations: 80,
+        settings,
+        getEdgeWeight: (_, attr) => attr.weight || 1,
+      });
       syncPositionsFromGraph();
       renderer.refresh();
+      return;
+    }
+
+    if (layout === "forceatlas2-cluster") {
+      if (!window.forceAtlas2) {
+        console.warn("forceatlas2 layout not available");
+        return;
+      }
+
+      if (!clusterMap.size) {
+        applyLayout("forceatlas2");
+        return;
+      }
+
+      let hasNonZero = false;
+      for (const id of ids) {
+        const x = graph.getNodeAttribute(id, "x");
+        const y = graph.getNodeAttribute(id, "y");
+        if (typeof x !== "number" || typeof y !== "number") {
+          hasNonZero = false;
+          break;
+        }
+        if (x !== 0 || y !== 0) {
+          hasNonZero = true;
+        }
+      }
+
+      if (!hasNonZero) {
+        for (const id of ids) {
+          const x = Math.random() * 4 - 2;
+          const y = Math.random() * 4 - 2;
+          graph.setNodeAttribute(id, "x", x);
+          graph.setNodeAttribute(id, "y", y);
+          positions.set(id, { x, y });
+        }
+      }
+
+      const tempEdges = addClusterEdges();
+      const settings = window.forceAtlas2.inferSettings(graph);
+      settings.gravity = Math.max(0.1, settings.gravity * 0.7);
+      settings.scalingRatio = Math.max(2, settings.scalingRatio * 1.1);
+      window.forceAtlas2.assign(graph, {
+        iterations: 90,
+        settings,
+        getEdgeWeight: (_, attr) => attr.weight || 1,
+      });
+      cleanupClusterEdges(tempEdges);
+      syncPositionsFromGraph();
+      renderer.refresh();
+    }
+  }
+
+  function addClusterEdges() {
+    const clusters = new Map();
+    for (const [id, clusterId] of clusterMap.entries()) {
+      const kind = nodeKindMap.get(id);
+      if (!kind || kind === "tag") {
+        continue;
+      }
+      if (!clusters.has(clusterId)) {
+        clusters.set(clusterId, []);
+      }
+      clusters.get(clusterId).push(id);
+    }
+
+    const keys = [];
+    for (const [clusterId, ids] of clusters.entries()) {
+      if (ids.length < 2) {
+        continue;
+      }
+      ids.sort();
+      for (let i = 0; i < ids.length - 1; i += 1) {
+        const key = `cluster:${clusterId}:${i}`;
+        if (graph.hasEdge(key) || graph.hasEdge(ids[i], ids[i + 1])) {
+          continue;
+        }
+        graph.addEdgeWithKey(key, ids[i], ids[i + 1], { weight: 4 });
+        keys.push(key);
+      }
+    }
+    return keys;
+  }
+
+  function cleanupClusterEdges(keys) {
+    for (const key of keys) {
+      if (graph.hasEdge(key)) {
+        graph.dropEdge(key);
+      }
     }
   }
 
@@ -426,6 +539,15 @@
       }
     });
 
+    const storedLabels = localStorage.getItem("oxidian.hideLabels");
+    toggleLabels.checked = storedLabels === "true";
+    toggleLabels.addEventListener("change", () => {
+      localStorage.setItem("oxidian.hideLabels", String(toggleLabels.checked));
+      if (lastPayload) {
+        applyGraph(filterPayload(lastPayload, toggleTags.checked));
+      }
+    });
+
     const storedLayout = localStorage.getItem("oxidian.layout");
     currentLayout = storedLayout || "static";
     layoutSelect.value = currentLayout;
@@ -436,7 +558,9 @@
       applyLayout(currentLayout);
       layoutDirty = false;
       forceToggle.style.display =
-        currentLayout === "forceatlas2" ? "inline-flex" : "none";
+        currentLayout === "forceatlas2" || currentLayout === "forceatlas2-cluster"
+          ? "inline-flex"
+          : "none";
     });
 
     const storedForceAuto = localStorage.getItem("oxidian.forceAuto");
@@ -445,7 +569,9 @@
       localStorage.setItem("oxidian.forceAuto", String(toggleForceAuto.checked));
     });
     forceToggle.style.display =
-      currentLayout === "forceatlas2" ? "inline-flex" : "none";
+      currentLayout === "forceatlas2" || currentLayout === "forceatlas2-cluster"
+        ? "inline-flex"
+        : "none";
 
     const storedCluster = localStorage.getItem("oxidian.clusterEnabled");
     toggleCluster.checked = storedCluster === "true";
