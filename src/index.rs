@@ -128,9 +128,11 @@ impl VaultIndex {
     }
 
     pub(crate) fn build_with_schema(vault: &Vault, schema_state: SchemaState) -> Result<Self> {
-        let mut idx = Self::default();
-        idx.schema_status = schema_state.status.clone();
-        idx.schema = schema_state.schema.clone();
+        let mut idx = Self {
+            schema_status: schema_state.status.clone(),
+            schema: schema_state.schema.clone(),
+            ..Self::default()
+        };
         for entry in walkdir::WalkDir::new(vault.root())
             .follow_links(false)
             .into_iter()
@@ -201,10 +203,10 @@ impl VaultIndex {
                 };
 
                 for (k_raw, v_raw) in &parsed.inline_fields {
-                    let Some(k) = normalize_field_key(&k_raw) else {
+                    let Some(k) = normalize_field_key(k_raw) else {
                         continue;
                     };
-                    let v = inline_value_to_field_value(&v_raw);
+                    let v = inline_value_to_field_value(v_raw);
                     merge_field(&mut fields, k, v);
                 }
 

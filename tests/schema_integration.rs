@@ -51,6 +51,82 @@ fn write_note(root: &std::path::Path, rel: &str, content: &str) {
 }
 
 #[test]
+fn journal_type_rule_requires_type() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("vault");
+    fs::create_dir_all(&root).expect("create vault");
+
+    let schema = r#"
+version = 1
+
+[node]
+types = ["journal"]
+
+[node.type.docs]
+journal = "Daily journal entry."
+
+[predicates.aliases]
+
+[vault.layout]
+allow_other_dirs = true
+
+[[vault.layout.dirs]]
+path = "journal"
+required = true
+
+[[vault.layout.type_rules]]
+dir = "journal"
+type = "journal"
+severity = "error"
+"#;
+
+    let schema_dir = root.join(".obsidian/oxidian");
+    fs::create_dir_all(&schema_dir).expect("create schema dir");
+    fs::write(schema_dir.join("schema.toml"), schema).expect("write schema");
+
+    write_note(&root, "journal/2026/06/2026-02-09.md", "---\n---\nbody\n");
+
+    let vault = Vault::open(&root).expect("open vault");
+    let index = VaultIndex::build(&vault).expect("build index");
+    let report = index.schema_report();
+
+    assert!(report.errors > 0);
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|v| v.violation.code == "layout_type_mismatch")
+    );
+}
+
+#[test]
+fn type_rule_rejects_dir_and_pattern() {
+    let schema = r#"
+version = 1
+
+[node]
+types = ["journal"]
+
+[node.type.docs]
+journal = "Daily journal entry."
+
+[predicates.aliases]
+
+[vault.layout]
+allow_other_dirs = true
+
+[[vault.layout.type_rules]]
+dir = "journal"
+match = "relpath"
+pattern = "^journal/.+\\.md$"
+type = "journal"
+"#;
+
+    let parsed = oxidian::Schema::from_toml_str(schema);
+    assert!(parsed.is_err());
+}
+
+#[test]
 fn schema_missing_is_disabled() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("vault");

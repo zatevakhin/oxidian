@@ -7,9 +7,9 @@ use std::sync::Once;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxidian::{
-    FileKind, LayoutDir, LayoutMatch, LayoutRule, Link, LinkIssueReason, LinkKind, NodeSchema,
-    NodeTypeSchema, PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity, SortDir, Tag,
-    TaskQuery, TaskStatus, Vault, VaultPath, VaultSchema, VaultService,
+    FileKind, LayoutDir, LayoutMatch, LayoutRule, LayoutTypeRule, Link, LinkIssueReason, LinkKind,
+    NodeSchema, NodeTypeSchema, PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity,
+    SortDir, Tag, TaskQuery, TaskStatus, Vault, VaultPath, VaultSchema, VaultService,
 };
 
 #[cfg(feature = "similarity")]
@@ -356,6 +356,7 @@ enum SchemaCommand {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SchemaTemplate {
     Para,
+    Kg,
 }
 
 #[tokio::main]
@@ -484,7 +485,7 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
                 let occs = note
                     .link_occurrences
                     .iter()
-                    .filter(|l| kind_filter.as_ref().map_or(true, |k| &l.kind == k))
+                    .filter(|l| kind_filter.as_ref().is_none_or(|k| &l.kind == k))
                     .filter(|l| !only_embeds || l.embed);
 
                 println!("\noccurrences:");
@@ -777,11 +778,7 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
                 for v in report
                     .violations
                     .iter()
-                    .filter(|v| {
-                        severity
-                            .as_ref()
-                            .map_or(true, |s| &v.violation.severity == s)
-                    })
+                    .filter(|v| severity.as_ref().is_none_or(|s| &v.violation.severity == s))
                     .take(limit)
                 {
                     let path = v
@@ -1114,6 +1111,7 @@ fn print_occ(l: &Link) {
 fn generate_schema_template(template: SchemaTemplate) -> Schema {
     match template {
         SchemaTemplate::Para => build_para_schema(),
+        SchemaTemplate::Kg => build_kg_schema(),
     }
 }
 
@@ -1273,6 +1271,390 @@ fn build_para_schema() -> Schema {
                 layout_rule("resources_any_depth", "resources", "^resources/.+\\.md$"),
                 layout_rule("archives_any_depth", "archives", "^archives/.+\\.md$"),
             ],
+            type_rules: Vec::new(),
+        },
+    };
+
+    Schema {
+        version: 1,
+        node,
+        predicates,
+        vault,
+    }
+}
+
+fn build_kg_schema() -> Schema {
+    let node = NodeSchema {
+        types: vec![
+            "concept".into(),
+            "entity".into(),
+            "journal".into(),
+            "person".into(),
+            "org".into(),
+            "project".into(),
+            "system".into(),
+            "tool".into(),
+            "document".into(),
+            "claim".into(),
+            "evidence".into(),
+            "task".into(),
+        ],
+        type_def: NodeTypeSchema {
+            docs: map_str([
+                ("concept", "Ideas, techniques, terms, taxonomies."),
+                ("entity", "Concrete named things (non-person/org)."),
+                ("journal", "Daily journal entry."),
+                ("person", "People."),
+                ("org", "Organizations or teams."),
+                ("project", "Initiatives with outcomes."),
+                ("system", "Composed systems or products."),
+                ("tool", "Software tools or services."),
+                ("document", "Docs, papers, specs, notes."),
+                ("claim", "Statements that can be supported or contradicted."),
+                ("evidence", "Evidence backing claims."),
+                ("task", "Tasks or benchmarks."),
+            ]),
+        },
+    };
+
+    let predicates = PredicatesSchema {
+        aliases: map_str([
+            ("relates_to", "related_to"),
+            ("similar_to", "related_to"),
+            ("belongs_to", "part_of"),
+            ("owned", "owned_by"),
+            ("author", "authored_by"),
+            ("cite", "cites"),
+            ("references", "cites"),
+            ("ref", "cites"),
+        ]),
+        defs: map_defs([
+            (
+                "is_a",
+                PredicateDef {
+                    description: "Classification: A is a kind of B.".into(),
+                    domain: vec!["*"].into_iter().map(str::to_string).collect(),
+                    range: vec!["concept"].into_iter().map(str::to_string).collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Error,
+                },
+            ),
+            (
+                "instance_of",
+                PredicateDef {
+                    description: "Instance of a concept.".into(),
+                    domain: vec![
+                        "entity", "system", "tool", "project", "task", "person", "org",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                    range: vec!["concept"].into_iter().map(str::to_string).collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "part_of",
+                PredicateDef {
+                    description: "Composition: A is part of B.".into(),
+                    domain: vec!["entity", "system", "project", "document"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["system", "project", "org"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "related_to",
+                PredicateDef {
+                    description: "Loose association (symmetric).".into(),
+                    domain: vec!["*"].into_iter().map(str::to_string).collect(),
+                    range: vec!["*"].into_iter().map(str::to_string).collect(),
+                    inverse: None,
+                    symmetric: true,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "supports",
+                PredicateDef {
+                    description: "Evidence supports a claim or concept.".into(),
+                    domain: vec!["evidence", "document"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["claim", "concept"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "contradicts",
+                PredicateDef {
+                    description: "Evidence contradicts a claim or concept.".into(),
+                    domain: vec!["evidence", "document"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["claim", "concept"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "uses",
+                PredicateDef {
+                    description: "A uses B in implementation or workflow.".into(),
+                    domain: vec!["system", "project", "tool"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["tool", "concept", "system"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "cites",
+                PredicateDef {
+                    description: "A cites B (stronger than plain links).".into(),
+                    domain: vec!["document", "claim", "evidence"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["document", "claim", "evidence"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "owned_by",
+                PredicateDef {
+                    description: "A is owned/maintained by a person/org.".into(),
+                    domain: vec!["project", "system", "tool"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["person", "org"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "authored_by",
+                PredicateDef {
+                    description: "A was authored by a person/org.".into(),
+                    domain: vec!["document", "claim", "evidence"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["person", "org"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "implements",
+                PredicateDef {
+                    description: "A implements a concept or spec.".into(),
+                    domain: vec!["system", "tool"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["concept", "document"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "derives_from",
+                PredicateDef {
+                    description: "A derives from evidence or documents.".into(),
+                    domain: vec!["claim", "document"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["evidence", "document"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+        ]),
+    };
+
+    let vault = VaultSchema {
+        layout: oxidian::VaultLayout {
+            allow_other_dirs: true,
+            dirs: vec![
+                LayoutDir {
+                    path: "kg".into(),
+                    required: true,
+                    description: Some("Knowledge graph notes".into()),
+                },
+                LayoutDir {
+                    path: "kg/concepts".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/entities".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/people".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/orgs".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/projects".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/systems".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/tools".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/documents".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/claims".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/evidence".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "kg/tasks".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "sources".into(),
+                    required: true,
+                    description: Some("Raw sources and references".into()),
+                },
+                LayoutDir {
+                    path: "sources/papers".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "sources/links".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "sources/notes".into(),
+                    required: true,
+                    description: None,
+                },
+                LayoutDir {
+                    path: "journal".into(),
+                    required: true,
+                    description: Some("Daily journal".into()),
+                },
+                LayoutDir {
+                    path: "inbox".into(),
+                    required: true,
+                    description: Some("Capture".into()),
+                },
+            ],
+            rules: vec![
+                layout_rule("kg_any_depth", "kg", "^kg/.+\\.md$"),
+                layout_rule_exts(
+                    "sources_any_depth",
+                    "sources",
+                    "^sources/.+\\.(md|pdf|html)$",
+                    &["md", "pdf", "html"],
+                ),
+                LayoutRule {
+                    id: "journal_weekly".into(),
+                    dir: Some("journal".into()),
+                    match_kind: LayoutMatch::Relpath,
+                    pattern: "^journal/(\\d{4})/(\\d{2})/(\\d{4})\\-(\\d{2})\\-(\\d{2})\\.md$"
+                        .into(),
+                    capture_equal: vec![[1, 3]],
+                    severity: SchemaSeverity::Warn,
+                    allow_extensions: vec!["md".into()],
+                },
+            ],
+            type_rules: vec![
+                type_rule_dir("kg/concepts", "concept", SchemaSeverity::Warn),
+                type_rule_dir("kg/entities", "entity", SchemaSeverity::Warn),
+                type_rule_dir("kg/people", "person", SchemaSeverity::Warn),
+                type_rule_dir("kg/orgs", "org", SchemaSeverity::Warn),
+                type_rule_dir("kg/projects", "project", SchemaSeverity::Warn),
+                type_rule_dir("kg/systems", "system", SchemaSeverity::Warn),
+                type_rule_dir("kg/tools", "tool", SchemaSeverity::Warn),
+                type_rule_dir("kg/documents", "document", SchemaSeverity::Warn),
+                type_rule_dir("kg/claims", "claim", SchemaSeverity::Warn),
+                type_rule_dir("kg/evidence", "evidence", SchemaSeverity::Warn),
+                type_rule_dir("kg/tasks", "task", SchemaSeverity::Warn),
+                type_rule_pattern(
+                    "^journal/(\\d{4})/(\\d{2})/(\\d{4})\\-(\\d{2})\\-(\\d{2})\\.md$",
+                    "journal",
+                    SchemaSeverity::Error,
+                ),
+            ],
         },
     };
 
@@ -1293,6 +1675,42 @@ fn layout_rule(id: &str, dir: &str, pattern: &str) -> LayoutRule {
         capture_equal: Vec::new(),
         severity: SchemaSeverity::Warn,
         allow_extensions: vec!["md".into(), "canvas".into()],
+    }
+}
+
+fn layout_rule_exts(id: &str, dir: &str, pattern: &str, exts: &[&str]) -> LayoutRule {
+    LayoutRule {
+        id: id.to_string(),
+        dir: Some(dir.to_string()),
+        match_kind: LayoutMatch::Relpath,
+        pattern: pattern.to_string(),
+        capture_equal: Vec::new(),
+        severity: SchemaSeverity::Warn,
+        allow_extensions: exts.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn type_rule_dir(dir: &str, required_type: &str, severity: SchemaSeverity) -> LayoutTypeRule {
+    LayoutTypeRule {
+        dir: Some(dir.to_string()),
+        match_kind: None,
+        pattern: None,
+        required_type: required_type.to_string(),
+        severity,
+    }
+}
+
+fn type_rule_pattern(
+    pattern: &str,
+    required_type: &str,
+    severity: SchemaSeverity,
+) -> LayoutTypeRule {
+    LayoutTypeRule {
+        dir: None,
+        match_kind: Some(LayoutMatch::Relpath),
+        pattern: Some(pattern.to_string()),
+        required_type: required_type.to_string(),
+        severity,
     }
 }
 
@@ -1327,5 +1745,16 @@ mod tests {
         assert!(text.contains("[predicates.aliases]"));
         assert!(text.contains("[vault.layout]"));
         assert!(text.contains("projects"));
+    }
+
+    #[test]
+    fn kg_template_contains_sections() {
+        let tpl = generate_schema_template(SchemaTemplate::Kg);
+        let text = toml::to_string_pretty(&tpl).expect("serialize schema");
+        assert!(text.contains("[node]"));
+        assert!(text.contains("[predicates.aliases]"));
+        assert!(text.contains("[vault.layout]"));
+        assert!(text.contains("kg"));
+        assert!(text.contains("journal"));
     }
 }

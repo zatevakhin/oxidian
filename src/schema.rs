@@ -20,17 +20,18 @@ pub enum SchemaSource {
     Inline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SchemaStatus {
+    #[default]
     Disabled,
-    Loaded { source: SchemaSource, version: u32 },
-    Error { source: SchemaSource, error: String },
-}
-
-impl Default for SchemaStatus {
-    fn default() -> Self {
-        SchemaStatus::Disabled
-    }
+    Loaded {
+        source: SchemaSource,
+        version: u32,
+    },
+    Error {
+        source: SchemaSource,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +180,8 @@ pub struct VaultLayout {
     pub dirs: Vec<LayoutDir>,
     #[serde(default)]
     pub rules: Vec<LayoutRule>,
+    #[serde(default)]
+    pub type_rules: Vec<LayoutTypeRule>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -206,6 +209,21 @@ pub struct LayoutRule {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LayoutTypeRule {
+    #[serde(default)]
+    pub dir: Option<String>,
+    #[serde(rename = "match")]
+    #[serde(default)]
+    pub match_kind: Option<LayoutMatch>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(rename = "type")]
+    pub required_type: String,
+    #[serde(default = "default_severity")]
+    pub severity: SchemaSeverity,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayoutMatch {
     Relpath,
@@ -229,6 +247,7 @@ impl Schema {
 
         out.extend(self.validate_node_type(fields));
         out.extend(self.validate_predicates(rel, fields, inline_fields));
+        out.extend(self.validate_type_rules(rel, fields));
 
         out
     }
@@ -378,6 +397,24 @@ impl Schema {
                 Error::SchemaToml(format!("rule '{}' invalid regex: {err}", rule.id))
             })?;
         }
+        for rule in &self.vault.layout.type_rules {
+            let has_dir = rule.dir.as_ref().is_some();
+            let has_pattern = rule.pattern.as_ref().is_some();
+            if has_dir == has_pattern {
+                return Err(Error::SchemaToml(
+                    "type_rules must set exactly one of dir or pattern".to_string(),
+                ));
+            }
+            if let Some(pattern) = &rule.pattern {
+                if rule.match_kind.is_none() {
+                    return Err(Error::SchemaToml(
+                        "type_rules with pattern must set match".to_string(),
+                    ));
+                }
+                Regex::new(pattern)
+                    .map_err(|err| Error::SchemaToml(format!("type_rule invalid regex: {err}")))?;
+            }
+        }
         Ok(())
     }
 
@@ -403,10 +440,10 @@ impl Schema {
             }
             FieldValue::List(items) => {
                 for item in items {
-                    if let FieldValue::String(s) = item {
-                        if !s.trim().is_empty() {
-                            types.push(s.trim().to_ascii_lowercase());
-                        }
+                    if let FieldValue::String(s) = item
+                        && !s.trim().is_empty()
+                    {
+                        types.push(s.trim().to_ascii_lowercase());
                     }
                 }
             }
@@ -471,17 +508,62 @@ impl Schema {
                 continue;
             };
 
-            if let Some(note_type) = &note_type {
-                if !predicate_domain_allows(&def.domain, note_type) {
-                    out.push(SchemaViolation {
-                        severity: def.severity.clone(),
-                        code: "predicate_domain".to_string(),
-                        message: format!(
-                            "predicate '{}' not allowed for node type '{}'",
-                            canonical, note_type
-                        ),
-                    });
+            if let Some(note_type) = &note_type
+                && !predicate_domain_allows(&def.domain, note_type)
+            {
+                out.push(SchemaViolation {
+                    severity: def.severity.clone(),
+                    code: "predicate_domain".to_string(),
+                    message: format!(
+                        "predicate '{}' not allowed for node type '{}'",
+                        canonical, note_type
+                    ),
+                });
+            }
+        }
+
+        out
+    }
+
+    fn validate_type_rules(&self, rel: &VaultPath, fields: &FieldMap) -> Vec<SchemaViolation> {
+        let rel_str = path_to_rel_string(rel.as_path());
+        let note_type = extract_note_type(fields);
+        let mut out = Vec::new();
+
+        for rule in &self.vault.layout.type_rules {
+            let applies = if let Some(dir) = &rule.dir {
+                let dir_path = dir.trim_matches('/');
+                rel_str == dir_path || rel_str.starts_with(&format!("{dir_path}/"))
+            } else if let Some(pattern) = &rule.pattern {
+                match rule.match_kind {
+                    Some(LayoutMatch::Relpath) => {
+                        Regex::new(pattern).is_ok_and(|re| re.is_match(&rel_str))
+                    }
+                    None => false,
                 }
+            } else {
+                false
+            };
+
+            if !applies {
+                continue;
+            }
+
+            let expected = rule.required_type.trim();
+            if expected.is_empty() {
+                continue;
+            }
+
+            let matches = note_type
+                .as_deref()
+                .map(|t| t.eq_ignore_ascii_case(expected))
+                .unwrap_or(false);
+            if !matches {
+                out.push(SchemaViolation {
+                    severity: rule.severity.clone(),
+                    code: "layout_type_mismatch".to_string(),
+                    message: format!("path '{rel_str}' requires type '{}'", rule.required_type),
+                });
             }
         }
 
