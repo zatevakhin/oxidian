@@ -1,3 +1,4 @@
+use std::fs;
 #[cfg(feature = "web-ui")]
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -6,8 +7,9 @@ use std::sync::Once;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxidian::{
-    FileKind, Link, LinkIssueReason, LinkKind, Query, SortDir, Tag, TaskQuery, TaskStatus, Vault,
-    VaultPath, VaultService,
+    FileKind, LayoutDir, LayoutMatch, LayoutRule, Link, LinkIssueReason, LinkKind, NodeSchema,
+    NodeTypeSchema, PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity, SortDir, Tag,
+    TaskQuery, TaskStatus, Vault, VaultPath, VaultSchema, VaultService,
 };
 
 #[cfg(feature = "similarity")]
@@ -42,6 +44,21 @@ enum StatusArg {
     InProgress,
     Cancelled,
     Blocked,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SchemaSeverityArg {
+    Warn,
+    Error,
+}
+
+impl From<SchemaSeverityArg> for SchemaSeverity {
+    fn from(value: SchemaSeverityArg) -> Self {
+        match value {
+            SchemaSeverityArg::Warn => SchemaSeverity::Warn,
+            SchemaSeverityArg::Error => SchemaSeverity::Error,
+        }
+    }
 }
 
 impl From<StatusArg> for TaskStatus {
@@ -107,6 +124,11 @@ enum Command {
         /// Bind address for the web server.
         #[arg(long, default_value = "127.0.0.1:7878")]
         bind: SocketAddr,
+    },
+    /// Schema utilities.
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommand,
     },
 }
 
@@ -203,6 +225,20 @@ enum ReportCommand {
         /// Maximum neighbors per note.
         #[arg(long)]
         top_k: Option<usize>,
+    },
+    /// Schema validation report.
+    Schema {
+        /// Print all schema violations.
+        #[arg(long)]
+        show_violations: bool,
+
+        /// Filter by severity.
+        #[arg(long, value_enum)]
+        severity: Option<SchemaSeverityArg>,
+
+        /// Maximum number of violations to print.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
     },
 }
 
@@ -303,6 +339,25 @@ enum SimilarityCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SchemaCommand {
+    /// Initialize a default schema in the vault.
+    Init {
+        /// Schema template name.
+        #[arg(long, value_enum, default_value = "para")]
+        template: SchemaTemplate,
+
+        /// Overwrite existing schema file.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SchemaTemplate {
+    Para,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -314,6 +369,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Watch { command } => handle_watch(cli.vault, command).await?,
         Command::Sqlite { command } => handle_sqlite(cli.vault, command).await?,
         Command::Similarity { command } => handle_similarity(cli.vault, command).await?,
+        Command::Schema { command } => handle_schema(cli.vault, command).await?,
         #[cfg(feature = "web-ui")]
         Command::WebUi { bind } => handle_web_ui(cli.vault, bind).await?,
     }
@@ -703,6 +759,43 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
                 }
             }
         }
+        ReportCommand::Schema {
+            show_violations,
+            severity,
+            limit,
+        } => {
+            let report = service.schema_report();
+            println!("schema");
+            println!("  status: {:?}", report.status);
+            println!("  errors: {}", report.errors);
+            println!("  warnings: {}", report.warnings);
+            println!("  total_violations: {}", report.violations.len());
+
+            if show_violations {
+                let severity = severity.map(Into::into);
+                println!("\nviolations:");
+                for v in report
+                    .violations
+                    .iter()
+                    .filter(|v| {
+                        severity
+                            .as_ref()
+                            .map_or(true, |s| &v.violation.severity == s)
+                    })
+                    .take(limit)
+                {
+                    let path = v
+                        .path
+                        .as_ref()
+                        .map(|p| p.as_str_lossy())
+                        .unwrap_or_else(|| "<vault>".into());
+                    println!(
+                        "- {}\t{:?}\t{}\t{}",
+                        path, v.violation.severity, v.violation.code, v.violation.message
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -945,6 +1038,38 @@ async fn handle_similarity(
     }
 }
 
+async fn handle_schema(vault: Option<PathBuf>, command: SchemaCommand) -> anyhow::Result<()> {
+    match command {
+        SchemaCommand::Init { template, force } => {
+            let vault = require_vault(vault)?;
+            let schema_path = vault.join(".obsidian/oxidian/schema.toml");
+            if schema_path.exists() && !force {
+                eprintln!(
+                    "schema already exists at {}; use --force to overwrite",
+                    schema_path.display()
+                );
+                anyhow::bail!("schema already exists");
+            }
+
+            if let Some(parent) = schema_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            let schema = generate_schema_template(template);
+            let contents = toml::to_string_pretty(&schema)
+                .map_err(|err| anyhow::anyhow!("failed to serialize schema: {err}"))?;
+            fs::write(&schema_path, contents)?;
+            println!(
+                "schema written to {} (template: {:?})",
+                schema_path.display(),
+                template
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(feature = "web-ui")]
 async fn handle_web_ui(vault: Option<PathBuf>, bind: SocketAddr) -> anyhow::Result<()> {
     init_web_ui_logging();
@@ -984,4 +1109,223 @@ fn print_occ(l: &Link) {
         "- {:?}\tembed={}\t{}:{}\ttarget={:?}\tsubpath={:?}\tdisplay={:?}\traw={:?}",
         l.kind, l.embed, l.location.line, l.location.column, l.target, l.subpath, l.display, l.raw
     );
+}
+
+fn generate_schema_template(template: SchemaTemplate) -> Schema {
+    match template {
+        SchemaTemplate::Para => build_para_schema(),
+    }
+}
+
+fn build_para_schema() -> Schema {
+    let node = NodeSchema {
+        types: vec![
+            "project".into(),
+            "area".into(),
+            "resource".into(),
+            "archive".into(),
+            "person".into(),
+            "concept".into(),
+            "doc".into(),
+            "tool".into(),
+        ],
+        type_def: NodeTypeSchema {
+            docs: map_str([
+                ("project", "Active outcomes with a deadline."),
+                ("area", "Ongoing responsibility."),
+                ("resource", "Reference or topic material."),
+                ("archive", "Inactive items."),
+                ("person", "People."),
+                ("concept", "Ideas, techniques, terms."),
+                ("doc", "Notes, docs, pages, specs."),
+                ("tool", "Software, tools, services."),
+            ]),
+        },
+    };
+
+    let predicates = PredicatesSchema {
+        aliases: map_str([
+            ("requires", "depends_on"),
+            ("required_by", "dependency_of"),
+            ("relates_to", "related_to"),
+            ("cite", "references"),
+            ("cites", "references"),
+            ("ref", "references"),
+        ]),
+        defs: map_defs([
+            (
+                "depends_on",
+                PredicateDef {
+                    description: "A requires B to function or proceed.".into(),
+                    domain: vec!["project", "area", "resource", "doc"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["project", "area", "resource", "doc", "tool"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: Some("dependency_of".into()),
+                    symmetric: false,
+                    severity: SchemaSeverity::Error,
+                },
+            ),
+            (
+                "related_to",
+                PredicateDef {
+                    description: "Loose association (symmetric).".into(),
+                    domain: vec!["*"].into_iter().map(str::to_string).collect(),
+                    range: vec!["*"].into_iter().map(str::to_string).collect(),
+                    inverse: None,
+                    symmetric: true,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "references",
+                PredicateDef {
+                    description: "A cites/points to B (stronger than plain links).".into(),
+                    domain: vec!["doc", "resource", "project", "area"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec![
+                        "doc", "resource", "project", "area", "person", "tool", "concept",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "part_of",
+                PredicateDef {
+                    description: "Composition: A is part of B.".into(),
+                    domain: vec!["resource", "doc", "project", "area", "archive"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["project", "area", "archive"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+            (
+                "supports",
+                PredicateDef {
+                    description: "A supports B (resource -> project/area).".into(),
+                    domain: vec!["resource", "doc"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    range: vec!["project", "area", "doc"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    inverse: None,
+                    symmetric: false,
+                    severity: SchemaSeverity::Warn,
+                },
+            ),
+        ]),
+    };
+
+    let vault = VaultSchema {
+        layout: oxidian::VaultLayout {
+            allow_other_dirs: true,
+            dirs: vec![
+                LayoutDir {
+                    path: "projects".into(),
+                    required: true,
+                    description: Some("Projects (outcomes)".into()),
+                },
+                LayoutDir {
+                    path: "areas".into(),
+                    required: true,
+                    description: Some("Areas (ongoing responsibilities)".into()),
+                },
+                LayoutDir {
+                    path: "resources".into(),
+                    required: true,
+                    description: Some("Resources (topics, references)".into()),
+                },
+                LayoutDir {
+                    path: "archives".into(),
+                    required: true,
+                    description: Some("Archives (inactive)".into()),
+                },
+                LayoutDir {
+                    path: "inbox".into(),
+                    required: true,
+                    description: Some("Capture".into()),
+                },
+            ],
+            rules: vec![
+                layout_rule("projects_any_depth", "projects", "^projects/.+\\.md$"),
+                layout_rule("areas_any_depth", "areas", "^areas/.+\\.md$"),
+                layout_rule("resources_any_depth", "resources", "^resources/.+\\.md$"),
+                layout_rule("archives_any_depth", "archives", "^archives/.+\\.md$"),
+            ],
+        },
+    };
+
+    Schema {
+        version: 1,
+        node,
+        predicates,
+        vault,
+    }
+}
+
+fn layout_rule(id: &str, dir: &str, pattern: &str) -> LayoutRule {
+    LayoutRule {
+        id: id.to_string(),
+        dir: Some(dir.to_string()),
+        match_kind: LayoutMatch::Relpath,
+        pattern: pattern.to_string(),
+        capture_equal: Vec::new(),
+        severity: SchemaSeverity::Warn,
+        allow_extensions: vec!["md".into(), "canvas".into()],
+    }
+}
+
+fn map_str<const N: usize>(items: [(&str, &str); N]) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for (k, v) in items {
+        out.insert(k.to_string(), v.to_string());
+    }
+    out
+}
+
+fn map_defs<const N: usize>(
+    items: [(&str, PredicateDef); N],
+) -> std::collections::BTreeMap<String, PredicateDef> {
+    let mut out: std::collections::BTreeMap<String, PredicateDef> =
+        std::collections::BTreeMap::new();
+    for (k, v) in items {
+        out.insert(k.to_string(), v);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaTemplate, generate_schema_template};
+
+    #[test]
+    fn para_template_contains_sections() {
+        let tpl = generate_schema_template(SchemaTemplate::Para);
+        let text = toml::to_string_pretty(&tpl).expect("serialize schema");
+        assert!(text.contains("[node]"));
+        assert!(text.contains("[predicates.aliases]"));
+        assert!(text.contains("[vault.layout]"));
+        assert!(text.contains("projects"));
+    }
 }

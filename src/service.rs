@@ -4,7 +4,10 @@ use std::sync::{Arc, RwLock};
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::{Error, IndexDelta, Result, Vault, VaultIndex, VaultPath};
+use crate::schema::SchemaState;
+use crate::{
+    Error, IndexDelta, Result, Schema, SchemaSource, SchemaStatus, Vault, VaultIndex, VaultPath,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchKind {
@@ -94,9 +97,12 @@ impl VaultService {
 
     pub async fn build_index(&self) -> Result<()> {
         let vault = self.vault.clone();
-        let built = tokio::task::spawn_blocking(move || VaultIndex::build(&vault))
-            .await
-            .map_err(|e| Error::InvalidVaultPath(format!("index build task failed: {e}")))??;
+        let schema_state = self.schema_state_for_rebuild();
+        let built = tokio::task::spawn_blocking(move || {
+            VaultIndex::build_with_schema(&vault, schema_state)
+        })
+        .await
+        .map_err(|e| Error::InvalidVaultPath(format!("index build task failed: {e}")))??;
 
         let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
         *guard = built;
@@ -122,6 +128,18 @@ impl VaultService {
 
     pub fn query(&self, q: &crate::Query) -> Vec<crate::QueryHit> {
         self.with_index(|idx| idx.query(q))
+    }
+
+    pub fn schema_status(&self) -> SchemaStatus {
+        self.with_index(|idx| idx.schema_status().clone())
+    }
+
+    pub fn schema_report(&self) -> crate::SchemaReport {
+        self.with_index(|idx| idx.schema_report())
+    }
+
+    pub fn schema_violations_for(&self, path: &VaultPath) -> Vec<crate::SchemaViolation> {
+        self.with_index(|idx| idx.schema_violations_for(path))
     }
 
     pub fn query_tasks(&self, q: &crate::TaskQuery) -> Vec<crate::TaskHit> {
@@ -202,6 +220,34 @@ impl VaultService {
         }));
         self.watcher = Some(watcher);
 
+        Ok(())
+    }
+
+    pub async fn reload_schema(&self) -> Result<()> {
+        let vault = self.vault.clone();
+        let schema_state = SchemaState::load(&vault);
+        let built = tokio::task::spawn_blocking(move || {
+            VaultIndex::build_with_schema(&vault, schema_state)
+        })
+        .await
+        .map_err(|e| Error::InvalidVaultPath(format!("schema reload task failed: {e}")))??;
+
+        let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
+        *guard = built;
+        Ok(())
+    }
+
+    pub async fn set_schema(&self, schema: Schema) -> Result<()> {
+        let vault = self.vault.clone();
+        let schema_state = SchemaState::from_schema(schema);
+        let built = tokio::task::spawn_blocking(move || {
+            VaultIndex::build_with_schema(&vault, schema_state)
+        })
+        .await
+        .map_err(|e| Error::InvalidVaultPath(format!("schema set task failed: {e}")))??;
+
+        let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
+        *guard = built;
         Ok(())
     }
 
@@ -581,4 +627,16 @@ mod tests {
 
 fn to_vault_path(vault: &Vault, abs: &Path) -> Option<VaultPath> {
     vault.to_rel(abs).ok()
+}
+
+impl VaultService {
+    fn schema_state_for_rebuild(&self) -> SchemaState {
+        self.with_index(|idx| match idx.schema_status() {
+            SchemaStatus::Loaded {
+                source: SchemaSource::Inline,
+                ..
+            } => idx.schema_state(),
+            _ => SchemaState::load(self.vault()),
+        })
+    }
 }

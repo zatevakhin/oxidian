@@ -12,7 +12,11 @@ use crate::fields::{
     normalize_field_key,
 };
 use crate::parse::{FrontmatterParse, parse_markdown_note};
-use crate::{BacklinksIndex, Error, Query, QueryHit, Result, Vault, VaultPath};
+use crate::schema::SchemaState;
+use crate::{
+    BacklinksIndex, Error, Query, QueryHit, Result, Schema, SchemaReport, SchemaSeverity,
+    SchemaStatus, SchemaViolation, SchemaViolationRecord, Vault, VaultPath,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
@@ -33,6 +37,7 @@ pub struct FileMeta {
     pub kind: FileKind,
     pub mtime: SystemTime,
     pub size: u64,
+    pub schema_violations: Vec<SchemaViolation>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +51,7 @@ pub struct NoteMeta {
     pub frontmatter: FrontmatterStatus,
     pub fields: FieldMap,
     pub tasks: Vec<Task>,
+    pub schema_violations: Vec<SchemaViolation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -87,6 +93,9 @@ pub struct VaultIndex {
     file_tags: HashMap<VaultPath, BTreeSet<Tag>>,
     file_links: HashMap<VaultPath, BTreeSet<LinkTarget>>,
     tags: HashMap<Tag, BTreeSet<VaultPath>>,
+    schema_status: SchemaStatus,
+    schema_vault_violations: Vec<SchemaViolationRecord>,
+    schema: Option<Schema>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,7 +123,14 @@ pub struct ContentSearchHit {
 
 impl VaultIndex {
     pub fn build(vault: &Vault) -> Result<Self> {
+        let schema_state = SchemaState::load(vault);
+        Self::build_with_schema(vault, schema_state)
+    }
+
+    pub(crate) fn build_with_schema(vault: &Vault, schema_state: SchemaState) -> Result<Self> {
         let mut idx = Self::default();
+        idx.schema_status = schema_state.status.clone();
+        idx.schema = schema_state.schema.clone();
         for entry in walkdir::WalkDir::new(vault.root())
             .follow_links(false)
             .into_iter()
@@ -133,6 +149,9 @@ impl VaultIndex {
             }
             idx.upsert_path(vault, rel)?;
         }
+        if let Some(schema) = &idx.schema {
+            idx.schema_vault_violations = schema.validate_vault_layout(vault);
+        }
         Ok(idx)
     }
 
@@ -150,14 +169,15 @@ impl VaultIndex {
         let size = meta.len();
         let kind = file_kind_from_path(vault, rel.as_path());
 
-        let file = FileMeta {
+        let base_file = FileMeta {
             path: rel.clone(),
             kind,
             mtime,
             size,
+            schema_violations: Vec::new(),
         };
-        self.files.insert(rel.clone(), file.clone());
-
+        let file_for_note = base_file.clone();
+        let mut file = base_file;
         let (new_tags, new_links, note_meta) = match kind {
             FileKind::Markdown | FileKind::Canvas => {
                 let content = std::fs::read_to_string(&abs).map_err(|e| Error::io(&abs, e))?;
@@ -180,7 +200,7 @@ impl VaultIndex {
                     },
                 };
 
-                for (k_raw, v_raw) in parsed.inline_fields {
+                for (k_raw, v_raw) in &parsed.inline_fields {
                     let Some(k) = normalize_field_key(&k_raw) else {
                         continue;
                     };
@@ -199,8 +219,8 @@ impl VaultIndex {
                     })
                     .collect();
 
-                let note_meta = NoteMeta {
-                    file,
+                let mut note_meta = NoteMeta {
+                    file: file_for_note,
                     title: parsed.title,
                     aliases,
                     tags: parsed.tags.clone(),
@@ -209,16 +229,31 @@ impl VaultIndex {
                     frontmatter,
                     fields,
                     tasks,
+                    schema_violations: Vec::new(),
                 };
+
+                if let Some(schema) = &self.schema {
+                    let violations =
+                        schema.validate_note(&rel, &note_meta.fields, &parsed.inline_fields);
+                    note_meta.schema_violations = violations;
+                }
                 (parsed.tags, parsed.links, Some(note_meta))
             }
             _ => (BTreeSet::new(), BTreeSet::new(), None),
         };
 
+        if let Some(schema) = &self.schema {
+            file.schema_violations = schema.validate_layout_for_path(&rel);
+        }
+        self.files.insert(rel.clone(), file);
+
         let old_tags = self.file_tags.insert(rel.clone(), new_tags.clone());
         let old_links = self.file_links.insert(rel.clone(), new_links.clone());
 
-        if let Some(note) = note_meta {
+        if let Some(mut note) = note_meta {
+            if let Some(file) = self.files.get(&rel) {
+                note.file.schema_violations = file.schema_violations.clone();
+            }
             self.notes.insert(rel.clone(), note);
         } else {
             self.notes.remove(&rel);
@@ -279,6 +314,67 @@ impl VaultIndex {
 
     pub fn query(&self, q: &Query) -> Vec<QueryHit> {
         q.execute(self)
+    }
+
+    pub fn schema_status(&self) -> &SchemaStatus {
+        &self.schema_status
+    }
+
+    pub(crate) fn schema_state(&self) -> SchemaState {
+        SchemaState {
+            status: self.schema_status.clone(),
+            schema: self.schema.clone(),
+        }
+    }
+
+    pub fn schema_report(&self) -> SchemaReport {
+        let mut violations = Vec::new();
+        violations.extend(self.schema_vault_violations.clone());
+
+        for file in self.files.values() {
+            for violation in &file.schema_violations {
+                violations.push(SchemaViolationRecord {
+                    path: Some(file.path.clone()),
+                    violation: violation.clone(),
+                });
+            }
+        }
+
+        for note in self.notes.values() {
+            for violation in &note.schema_violations {
+                violations.push(SchemaViolationRecord {
+                    path: Some(note.file.path.clone()),
+                    violation: violation.clone(),
+                });
+            }
+        }
+
+        let mut errors = 0usize;
+        let mut warnings = 0usize;
+        for v in &violations {
+            match v.violation.severity {
+                SchemaSeverity::Error => errors += 1,
+                SchemaSeverity::Warn => warnings += 1,
+            }
+        }
+
+        SchemaReport {
+            status: self.schema_status.clone(),
+            errors,
+            warnings,
+            violations,
+        }
+    }
+
+    pub fn schema_violations_for(&self, path: &VaultPath) -> Vec<SchemaViolation> {
+        let mut out = Vec::new();
+        if let Some(file) = self.files.get(path) {
+            out.extend(file.schema_violations.iter().cloned());
+        }
+        if let Some(note) = self.notes.get(path) {
+            out.extend(note.schema_violations.iter().cloned());
+        }
+        out
     }
 
     pub fn query_tasks(&self, q: &crate::TaskQuery) -> Vec<crate::TaskHit> {

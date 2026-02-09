@@ -30,6 +30,8 @@ pub struct VaultConfig {
     pub embedding_model_url: String,
     /// URL to download the tokenizer JSON from.
     pub embedding_tokenizer_url: String,
+    /// Vault schema TOML path (relative to vault root).
+    pub schema_path: PathBuf,
 }
 
 impl Default for VaultConfig {
@@ -60,6 +62,7 @@ impl Default for VaultConfig {
             embedding_cache_dir: PathBuf::from(".obsidian/oxidian/embeddings"),
             embedding_model_url: DEFAULT_EMBEDDING_MODEL_URL.into(),
             embedding_tokenizer_url: DEFAULT_EMBEDDING_TOKENIZER_URL.into(),
+            schema_path: PathBuf::from(".obsidian/oxidian/schema.toml"),
         }
     }
 }

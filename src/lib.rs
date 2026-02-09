@@ -11,6 +11,7 @@ mod links;
 mod mentions;
 mod parse;
 mod query;
+mod schema;
 mod service;
 #[cfg(feature = "similarity")]
 mod similarity;
@@ -33,6 +34,11 @@ pub use crate::links::{
 };
 pub use crate::mentions::UnlinkedMention;
 pub use crate::query::{CmpOp, Query, QueryHit, SortDir, SortKey, TaskHit, TaskQuery};
+pub use crate::schema::{
+    LayoutDir, LayoutMatch, LayoutRule, NodeSchema, NodeTypeSchema, PredicateDef, PredicatesSchema,
+    Schema, SchemaReport, SchemaSeverity, SchemaSource, SchemaStatus, SchemaViolation,
+    SchemaViolationRecord, VaultLayout, VaultSchema,
+};
 pub use crate::service::{ReindexCause, VaultEvent, VaultService, WatchKind};
 #[cfg(feature = "similarity")]
 pub use crate::similarity::{NoteSimilarityHit, NoteSimilarityReport, SimilaritySettings};

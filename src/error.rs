@@ -26,6 +26,9 @@ pub enum Error {
     #[error("notify error: {0}")]
     Notify(#[from] notify::Error),
 
+    #[error("schema toml parse error: {0}")]
+    SchemaToml(String),
+
     #[error("embedding error: {0}")]
     Embedding(String),
 }
