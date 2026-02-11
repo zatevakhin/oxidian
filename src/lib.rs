@@ -35,9 +35,10 @@ pub use crate::links::{
 pub use crate::mentions::UnlinkedMention;
 pub use crate::query::{CmpOp, Query, QueryHit, SortDir, SortKey, TaskHit, TaskQuery};
 pub use crate::schema::{
-    LayoutDir, LayoutMatch, LayoutRule, LayoutTypeRule, NodeSchema, NodeTypeSchema, PredicateDef,
-    PredicatesSchema, Schema, SchemaReport, SchemaSeverity, SchemaSource, SchemaStatus,
-    SchemaViolation, SchemaViolationRecord, VaultLayout, VaultSchema,
+    LayoutRule, NodeSchema, NodeTypeSchema, PredicateDef, PredicatesSchema, Schema, SchemaReport,
+    SchemaSeverity, SchemaSource, SchemaStatus, SchemaViolation, SchemaViolationRecord, ScopeKind,
+    ScopeNoteType, ScopeNotes, ScopeRequireAny, ScopeResolution, UnmatchedBehavior, VaultSchema,
+    VaultScope,
 };
 pub use crate::service::{ReindexCause, VaultEvent, VaultService, WatchKind};
 #[cfg(feature = "similarity")]

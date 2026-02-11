@@ -7,9 +7,10 @@ use std::sync::Once;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxidian::{
-    FileKind, LayoutDir, LayoutMatch, LayoutRule, LayoutTypeRule, Link, LinkIssueReason, LinkKind,
-    NodeSchema, NodeTypeSchema, PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity,
-    SortDir, Tag, TaskQuery, TaskStatus, Vault, VaultPath, VaultSchema, VaultService,
+    FileKind, LayoutRule, Link, LinkIssueReason, LinkKind, NodeSchema, NodeTypeSchema,
+    PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity, ScopeResolution, SortDir, Tag,
+    TaskQuery, TaskStatus, UnmatchedBehavior, Vault, VaultPath, VaultSchema, VaultScope,
+    VaultService,
 };
 
 #[cfg(feature = "similarity")]
@@ -357,6 +358,7 @@ enum SchemaCommand {
 enum SchemaTemplate {
     Para,
     Kg,
+    KgMemory,
 }
 
 #[tokio::main]
@@ -1112,6 +1114,7 @@ fn generate_schema_template(template: SchemaTemplate) -> Schema {
     match template {
         SchemaTemplate::Para => build_para_schema(),
         SchemaTemplate::Kg => build_kg_schema(),
+        SchemaTemplate::KgMemory => build_kg_memory_schema(),
     }
 }
 
@@ -1159,10 +1162,6 @@ fn build_para_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec!["project", "area", "resource", "doc", "tool"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
                     inverse: Some("dependency_of".into()),
                     symmetric: false,
                     severity: SchemaSeverity::Error,
@@ -1173,7 +1172,6 @@ fn build_para_schema() -> Schema {
                 PredicateDef {
                     description: "Loose association (symmetric).".into(),
                     domain: vec!["*"].into_iter().map(str::to_string).collect(),
-                    range: vec!["*"].into_iter().map(str::to_string).collect(),
                     inverse: None,
                     symmetric: true,
                     severity: SchemaSeverity::Warn,
@@ -1187,12 +1185,6 @@ fn build_para_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec![
-                        "doc", "resource", "project", "area", "person", "tool", "concept",
-                    ]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1203,10 +1195,6 @@ fn build_para_schema() -> Schema {
                 PredicateDef {
                     description: "Composition: A is part of B.".into(),
                     domain: vec!["resource", "doc", "project", "area", "archive"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    range: vec!["project", "area", "archive"]
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
@@ -1223,10 +1211,6 @@ fn build_para_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec!["project", "area", "doc"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1236,43 +1220,55 @@ fn build_para_schema() -> Schema {
     };
 
     let vault = VaultSchema {
-        layout: oxidian::VaultLayout {
-            allow_other_dirs: true,
-            dirs: vec![
-                LayoutDir {
-                    path: "projects".into(),
-                    required: true,
-                    description: Some("Projects (outcomes)".into()),
-                },
-                LayoutDir {
-                    path: "areas".into(),
-                    required: true,
-                    description: Some("Areas (ongoing responsibilities)".into()),
-                },
-                LayoutDir {
-                    path: "resources".into(),
-                    required: true,
-                    description: Some("Resources (topics, references)".into()),
-                },
-                LayoutDir {
-                    path: "archives".into(),
-                    required: true,
-                    description: Some("Archives (inactive)".into()),
-                },
-                LayoutDir {
-                    path: "inbox".into(),
-                    required: true,
-                    description: Some("Capture".into()),
-                },
-            ],
-            rules: vec![
-                layout_rule("projects_any_depth", "projects", "^projects/.+\\.md$"),
-                layout_rule("areas_any_depth", "areas", "^areas/.+\\.md$"),
-                layout_rule("resources_any_depth", "resources", "^resources/.+\\.md$"),
-                layout_rule("archives_any_depth", "archives", "^archives/.+\\.md$"),
-            ],
-            type_rules: Vec::new(),
-        },
+        scope_resolution: ScopeResolution::MostSpecific,
+        unscoped: UnmatchedBehavior::Allow,
+        deny: Vec::new(),
+        scopes: vec![
+            scope_notes(
+                "projects",
+                "projects",
+                Some("Projects (outcomes)"),
+                true,
+                UnmatchedBehavior::Warn,
+            ),
+            scope_notes(
+                "areas",
+                "areas",
+                Some("Areas (ongoing responsibilities)"),
+                true,
+                UnmatchedBehavior::Warn,
+            ),
+            scope_notes(
+                "resources",
+                "resources",
+                Some("Resources (topics, references)"),
+                true,
+                UnmatchedBehavior::Warn,
+            ),
+            scope_notes(
+                "archives",
+                "archives",
+                Some("Archives (inactive)"),
+                true,
+                UnmatchedBehavior::Warn,
+            ),
+            VaultScope {
+                id: "inbox".into(),
+                path: "inbox".into(),
+                required: true,
+                description: Some("Capture".into()),
+                unmatched_files: UnmatchedBehavior::Allow,
+                allow: Vec::new(),
+                deny: Vec::new(),
+                inherit_allow: false,
+                inherit_deny: false,
+                inherit_notes: false,
+                kinds: Vec::new(),
+                extensions: Vec::new(),
+                notes: None,
+                orphan_attachments: None,
+            },
+        ],
     };
 
     Schema {
@@ -1334,7 +1330,6 @@ fn build_kg_schema() -> Schema {
                 PredicateDef {
                     description: "Classification: A is a kind of B.".into(),
                     domain: vec!["*"].into_iter().map(str::to_string).collect(),
-                    range: vec!["concept"].into_iter().map(str::to_string).collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Error,
@@ -1350,7 +1345,6 @@ fn build_kg_schema() -> Schema {
                     .into_iter()
                     .map(str::to_string)
                     .collect(),
-                    range: vec!["concept"].into_iter().map(str::to_string).collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1364,10 +1358,6 @@ fn build_kg_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec!["system", "project", "org"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1378,7 +1368,6 @@ fn build_kg_schema() -> Schema {
                 PredicateDef {
                     description: "Loose association (symmetric).".into(),
                     domain: vec!["*"].into_iter().map(str::to_string).collect(),
-                    range: vec!["*"].into_iter().map(str::to_string).collect(),
                     inverse: None,
                     symmetric: true,
                     severity: SchemaSeverity::Warn,
@@ -1389,10 +1378,6 @@ fn build_kg_schema() -> Schema {
                 PredicateDef {
                     description: "Evidence supports a claim or concept.".into(),
                     domain: vec!["evidence", "document"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    range: vec!["claim", "concept"]
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
@@ -1409,10 +1394,6 @@ fn build_kg_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec!["claim", "concept"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1423,10 +1404,6 @@ fn build_kg_schema() -> Schema {
                 PredicateDef {
                     description: "A uses B in implementation or workflow.".into(),
                     domain: vec!["system", "project", "tool"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    range: vec!["tool", "concept", "system"]
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
@@ -1443,10 +1420,6 @@ fn build_kg_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec!["document", "claim", "evidence"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1457,10 +1430,6 @@ fn build_kg_schema() -> Schema {
                 PredicateDef {
                     description: "A is owned/maintained by a person/org.".into(),
                     domain: vec!["project", "system", "tool"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    range: vec!["person", "org"]
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
@@ -1477,10 +1446,6 @@ fn build_kg_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec!["person", "org"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1491,10 +1456,6 @@ fn build_kg_schema() -> Schema {
                 PredicateDef {
                     description: "A implements a concept or spec.".into(),
                     domain: vec!["system", "tool"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    range: vec!["concept", "document"]
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
@@ -1511,10 +1472,6 @@ fn build_kg_schema() -> Schema {
                         .into_iter()
                         .map(str::to_string)
                         .collect(),
-                    range: vec!["evidence", "document"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
                     inverse: None,
                     symmetric: false,
                     severity: SchemaSeverity::Warn,
@@ -1524,138 +1481,100 @@ fn build_kg_schema() -> Schema {
     };
 
     let vault = VaultSchema {
-        layout: oxidian::VaultLayout {
-            allow_other_dirs: true,
-            dirs: vec![
-                LayoutDir {
-                    path: "kg".into(),
-                    required: true,
-                    description: Some("Knowledge graph notes".into()),
-                },
-                LayoutDir {
-                    path: "kg/concepts".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/entities".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/people".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/orgs".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/projects".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/systems".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/tools".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/documents".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/claims".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/evidence".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "kg/tasks".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "sources".into(),
-                    required: true,
-                    description: Some("Raw sources and references".into()),
-                },
-                LayoutDir {
-                    path: "sources/papers".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "sources/links".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "sources/notes".into(),
-                    required: true,
-                    description: None,
-                },
-                LayoutDir {
-                    path: "journal".into(),
-                    required: true,
-                    description: Some("Daily journal".into()),
-                },
-                LayoutDir {
-                    path: "inbox".into(),
-                    required: true,
-                    description: Some("Capture".into()),
-                },
-            ],
-            rules: vec![
-                layout_rule("kg_any_depth", "kg", "^kg/.+\\.md$"),
-                layout_rule_exts(
-                    "sources_any_depth",
-                    "sources",
-                    "^sources/.+\\.(md|pdf|html)$",
-                    &["md", "pdf", "html"],
-                ),
-                LayoutRule {
+        scope_resolution: ScopeResolution::MostSpecific,
+        unscoped: UnmatchedBehavior::Allow,
+        deny: Vec::new(),
+        scopes: vec![
+            scope_notes(
+                "kg",
+                "kg",
+                Some("Knowledge graph notes"),
+                true,
+                UnmatchedBehavior::Warn,
+            ),
+            scope_notes_typed("kg_concepts", "kg/concepts", true, "concept"),
+            scope_notes_typed("kg_entities", "kg/entities", true, "entity"),
+            scope_notes_typed("kg_people", "kg/people", true, "person"),
+            scope_notes_typed("kg_orgs", "kg/orgs", true, "org"),
+            scope_notes_typed("kg_projects", "kg/projects", true, "project"),
+            scope_notes_typed("kg_systems", "kg/systems", true, "system"),
+            scope_notes_typed("kg_tools", "kg/tools", true, "tool"),
+            scope_notes_typed("kg_documents", "kg/documents", true, "document"),
+            scope_notes_typed("kg_claims", "kg/claims", true, "claim"),
+            scope_notes_typed("kg_evidence", "kg/evidence", true, "evidence"),
+            scope_notes_typed("kg_tasks", "kg/tasks", true, "task"),
+            VaultScope {
+                id: "sources".into(),
+                path: "sources".into(),
+                required: true,
+                description: Some("Raw sources and references".into()),
+                unmatched_files: UnmatchedBehavior::Warn,
+                allow: vec![
+                    allow_glob("sources_md", "**/*.md"),
+                    allow_glob("sources_pdf", "**/*.pdf"),
+                    allow_glob("sources_html", "**/*.html"),
+                ],
+                deny: Vec::new(),
+                inherit_allow: false,
+                inherit_deny: false,
+                inherit_notes: false,
+                kinds: Vec::new(),
+                extensions: Vec::new(),
+                notes: None,
+                orphan_attachments: None,
+            },
+            scope_inherit("sources_papers", "sources/papers", true),
+            scope_inherit("sources_links", "sources/links", true),
+            scope_inherit("sources_notes", "sources/notes", true),
+            VaultScope {
+                id: "journal".into(),
+                path: "journal".into(),
+                required: true,
+                description: Some("Daily journal".into()),
+                unmatched_files: UnmatchedBehavior::Warn,
+                allow: vec![LayoutRule {
                     id: "journal_weekly".into(),
-                    dir: Some("journal".into()),
-                    match_kind: LayoutMatch::Relpath,
-                    pattern: "^journal/(\\d{4})/(\\d{2})/(\\d{4})\\-(\\d{2})\\-(\\d{2})\\.md$"
-                        .into(),
-                    capture_equal: vec![[1, 3]],
+                    description: None,
+                    glob: None,
+                    regex: None,
+                    template: Some(
+                        "{year:yyyy}/{week:ww}/{year:yyyy}-{month:mm}-{day:dd}.md".into(),
+                    ),
                     severity: SchemaSeverity::Warn,
-                    allow_extensions: vec!["md".into()],
-                },
-            ],
-            type_rules: vec![
-                type_rule_dir("kg/concepts", "concept", SchemaSeverity::Warn),
-                type_rule_dir("kg/entities", "entity", SchemaSeverity::Warn),
-                type_rule_dir("kg/people", "person", SchemaSeverity::Warn),
-                type_rule_dir("kg/orgs", "org", SchemaSeverity::Warn),
-                type_rule_dir("kg/projects", "project", SchemaSeverity::Warn),
-                type_rule_dir("kg/systems", "system", SchemaSeverity::Warn),
-                type_rule_dir("kg/tools", "tool", SchemaSeverity::Warn),
-                type_rule_dir("kg/documents", "document", SchemaSeverity::Warn),
-                type_rule_dir("kg/claims", "claim", SchemaSeverity::Warn),
-                type_rule_dir("kg/evidence", "evidence", SchemaSeverity::Warn),
-                type_rule_dir("kg/tasks", "task", SchemaSeverity::Warn),
-                type_rule_pattern(
-                    "^journal/(\\d{4})/(\\d{2})/(\\d{4})\\-(\\d{2})\\-(\\d{2})\\.md$",
-                    "journal",
-                    SchemaSeverity::Error,
-                ),
-            ],
-        },
+                }],
+                deny: Vec::new(),
+                inherit_allow: false,
+                inherit_deny: false,
+                inherit_notes: false,
+                kinds: Vec::new(),
+                extensions: Vec::new(),
+                notes: Some(oxidian::ScopeNotes {
+                    r#type: Some(oxidian::ScopeNoteType {
+                        required: true,
+                        allowed: vec!["journal".into()],
+                        severity: SchemaSeverity::Error,
+                    }),
+                    require_any: None,
+                }),
+                orphan_attachments: None,
+            },
+            VaultScope {
+                id: "inbox".into(),
+                path: "inbox".into(),
+                required: true,
+                description: Some("Capture".into()),
+                unmatched_files: UnmatchedBehavior::Allow,
+                allow: Vec::new(),
+                deny: Vec::new(),
+                inherit_allow: false,
+                inherit_deny: false,
+                inherit_notes: false,
+                kinds: Vec::new(),
+                extensions: Vec::new(),
+                notes: None,
+                orphan_attachments: None,
+            },
+        ],
     };
 
     Schema {
@@ -1666,52 +1585,185 @@ fn build_kg_schema() -> Schema {
     }
 }
 
-fn layout_rule(id: &str, dir: &str, pattern: &str) -> LayoutRule {
+fn build_kg_memory_schema() -> Schema {
+    let mut schema = build_kg_schema();
+    insert_node_type(
+        &mut schema.node,
+        "memory",
+        "Memory entries (daily context, reflections).",
+    );
+    insert_node_type(&mut schema.node, "event", "Memory event.");
+    insert_node_type(&mut schema.node, "quote", "Memory quote.");
+    insert_node_type(&mut schema.node, "decision", "Memory decision.");
+    insert_node_type(&mut schema.node, "fact", "Memory fact.");
+    insert_node_type(&mut schema.node, "preference", "Memory preference.");
+
+    schema.vault.scopes.push(VaultScope {
+        id: "memory".into(),
+        path: "memory".into(),
+        required: true,
+        description: Some("Memories".into()),
+        unmatched_files: UnmatchedBehavior::Error,
+        allow: vec![LayoutRule {
+            id: "memory_entry".into(),
+            description: None,
+            glob: None,
+            regex: None,
+            template: Some("{year:yyyy}/{month:mm}/{day:dd}/{slug:slug}.md".into()),
+            severity: SchemaSeverity::Error,
+        }],
+        deny: Vec::new(),
+        inherit_allow: false,
+        inherit_deny: false,
+        inherit_notes: false,
+        kinds: Vec::new(),
+        extensions: Vec::new(),
+        notes: Some(oxidian::ScopeNotes {
+            r#type: Some(oxidian::ScopeNoteType {
+                required: true,
+                allowed: vec![
+                    "memory".into(),
+                    "event".into(),
+                    "quote".into(),
+                    "decision".into(),
+                    "fact".into(),
+                    "preference".into(),
+                ],
+                severity: SchemaSeverity::Error,
+            }),
+            require_any: Some(oxidian::ScopeRequireAny {
+                tags: vec![
+                    "event".into(),
+                    "quote".into(),
+                    "decision".into(),
+                    "fact".into(),
+                    "preference".into(),
+                ],
+                types: vec![
+                    "event".into(),
+                    "quote".into(),
+                    "decision".into(),
+                    "fact".into(),
+                    "preference".into(),
+                ],
+                severity: SchemaSeverity::Error,
+            }),
+        }),
+        orphan_attachments: None,
+    });
+
+    schema.vault.scopes.push(VaultScope {
+        id: "memory_assets".into(),
+        path: "memory/assets".into(),
+        required: true,
+        description: Some("Memory attachments".into()),
+        unmatched_files: UnmatchedBehavior::Warn,
+        allow: vec![allow_glob("memory_assets_any", "**/*")],
+        deny: Vec::new(),
+        inherit_allow: false,
+        inherit_deny: false,
+        inherit_notes: false,
+        kinds: vec![oxidian::ScopeKind::Attachment],
+        extensions: Vec::new(),
+        notes: None,
+        orphan_attachments: Some(SchemaSeverity::Warn),
+    });
+
+    schema
+}
+
+fn allow_glob(id: &str, glob: &str) -> LayoutRule {
     LayoutRule {
         id: id.to_string(),
-        dir: Some(dir.to_string()),
-        match_kind: LayoutMatch::Relpath,
-        pattern: pattern.to_string(),
-        capture_equal: Vec::new(),
+        description: None,
+        glob: Some(glob.to_string()),
+        regex: None,
+        template: None,
         severity: SchemaSeverity::Warn,
-        allow_extensions: vec!["md".into(), "canvas".into()],
     }
 }
 
-fn layout_rule_exts(id: &str, dir: &str, pattern: &str, exts: &[&str]) -> LayoutRule {
-    LayoutRule {
+fn scope_notes(
+    id: &str,
+    path: &str,
+    description: Option<&str>,
+    required: bool,
+    unmatched_files: UnmatchedBehavior,
+) -> VaultScope {
+    VaultScope {
         id: id.to_string(),
-        dir: Some(dir.to_string()),
-        match_kind: LayoutMatch::Relpath,
-        pattern: pattern.to_string(),
-        capture_equal: Vec::new(),
-        severity: SchemaSeverity::Warn,
-        allow_extensions: exts.iter().map(|s| s.to_string()).collect(),
+        path: path.to_string(),
+        required,
+        description: description.map(str::to_string),
+        unmatched_files,
+        allow: vec![
+            allow_glob("notes_md", "**/*.md"),
+            allow_glob("notes_canvas", "**/*.canvas"),
+        ],
+        deny: Vec::new(),
+        inherit_allow: false,
+        inherit_deny: false,
+        inherit_notes: false,
+        kinds: Vec::new(),
+        extensions: Vec::new(),
+        notes: None,
+        orphan_attachments: None,
     }
 }
 
-fn type_rule_dir(dir: &str, required_type: &str, severity: SchemaSeverity) -> LayoutTypeRule {
-    LayoutTypeRule {
-        dir: Some(dir.to_string()),
-        match_kind: None,
-        pattern: None,
-        required_type: required_type.to_string(),
-        severity,
+fn scope_notes_typed(id: &str, path: &str, required: bool, note_type: &str) -> VaultScope {
+    VaultScope {
+        id: id.to_string(),
+        path: path.to_string(),
+        required,
+        description: None,
+        unmatched_files: UnmatchedBehavior::Warn,
+        allow: Vec::new(),
+        deny: Vec::new(),
+        inherit_allow: true,
+        inherit_deny: false,
+        inherit_notes: false,
+        kinds: Vec::new(),
+        extensions: Vec::new(),
+        notes: Some(oxidian::ScopeNotes {
+            r#type: Some(oxidian::ScopeNoteType {
+                required: true,
+                allowed: vec![note_type.to_string()],
+                severity: SchemaSeverity::Warn,
+            }),
+            require_any: None,
+        }),
+        orphan_attachments: None,
     }
 }
 
-fn type_rule_pattern(
-    pattern: &str,
-    required_type: &str,
-    severity: SchemaSeverity,
-) -> LayoutTypeRule {
-    LayoutTypeRule {
-        dir: None,
-        match_kind: Some(LayoutMatch::Relpath),
-        pattern: Some(pattern.to_string()),
-        required_type: required_type.to_string(),
-        severity,
+fn scope_inherit(id: &str, path: &str, required: bool) -> VaultScope {
+    VaultScope {
+        id: id.to_string(),
+        path: path.to_string(),
+        required,
+        description: None,
+        unmatched_files: UnmatchedBehavior::Warn,
+        allow: Vec::new(),
+        deny: Vec::new(),
+        inherit_allow: true,
+        inherit_deny: false,
+        inherit_notes: false,
+        kinds: Vec::new(),
+        extensions: Vec::new(),
+        notes: None,
+        orphan_attachments: None,
     }
+}
+
+fn insert_node_type(node: &mut NodeSchema, key: &str, doc: &str) {
+    if !node.types.iter().any(|t| t.eq_ignore_ascii_case(key)) {
+        node.types.push(key.to_string());
+    }
+    node.type_def
+        .docs
+        .entry(key.to_string())
+        .or_insert_with(|| doc.to_string());
 }
 
 fn map_str<const N: usize>(items: [(&str, &str); N]) -> std::collections::BTreeMap<String, String> {
@@ -1743,7 +1795,8 @@ mod tests {
         let text = toml::to_string_pretty(&tpl).expect("serialize schema");
         assert!(text.contains("[node]"));
         assert!(text.contains("[predicates.aliases]"));
-        assert!(text.contains("[vault.layout]"));
+        assert!(text.contains("[vault]"));
+        assert!(text.contains("[[vault.scopes]]"));
         assert!(text.contains("projects"));
     }
 
@@ -1753,8 +1806,21 @@ mod tests {
         let text = toml::to_string_pretty(&tpl).expect("serialize schema");
         assert!(text.contains("[node]"));
         assert!(text.contains("[predicates.aliases]"));
-        assert!(text.contains("[vault.layout]"));
+        assert!(text.contains("[vault]"));
+        assert!(text.contains("[[vault.scopes]]"));
         assert!(text.contains("kg"));
         assert!(text.contains("journal"));
+    }
+
+    #[test]
+    fn kg_memory_template_contains_sections() {
+        let tpl = generate_schema_template(SchemaTemplate::KgMemory);
+        let text = toml::to_string_pretty(&tpl).expect("serialize schema");
+        assert!(text.contains("[node]"));
+        assert!(text.contains("[predicates.aliases]"));
+        assert!(text.contains("[vault]"));
+        assert!(text.contains("[[vault.scopes]]"));
+        assert!(text.contains("memory"));
+        assert!(text.contains("{year:yyyy}/{month:mm}/{day:dd}/{slug:slug}.md"));
     }
 }

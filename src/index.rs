@@ -235,8 +235,12 @@ impl VaultIndex {
                 };
 
                 if let Some(schema) = &self.schema {
-                    let violations =
-                        schema.validate_note(&rel, &note_meta.fields, &parsed.inline_fields);
+                    let violations = schema.validate_note(
+                        &rel,
+                        &note_meta.fields,
+                        &parsed.inline_fields,
+                        &note_meta.tags,
+                    );
                     note_meta.schema_violations = violations;
                 }
                 (parsed.tags, parsed.links, Some(note_meta))
@@ -245,7 +249,7 @@ impl VaultIndex {
         };
 
         if let Some(schema) = &self.schema {
-            file.schema_violations = schema.validate_layout_for_path(&rel);
+            file.schema_violations = schema.validate_layout_for_path(vault, &rel);
         }
         self.files.insert(rel.clone(), file);
 
@@ -348,6 +352,57 @@ impl VaultIndex {
                     path: Some(note.file.path.clone()),
                     violation: violation.clone(),
                 });
+            }
+        }
+
+        if let Some(schema) = &self.schema {
+            let has_orphan_rules = schema
+                .vault
+                .scopes
+                .iter()
+                .any(|scope| scope.orphan_attachments.is_some());
+            if has_orphan_rules {
+                let resolver = self.link_resolver();
+                let mut referenced = HashSet::new();
+                for (source, note) in self.notes_iter() {
+                    for link in &note.link_occurrences {
+                        if !matches!(link.target, crate::LinkTarget::Internal { .. }) {
+                            continue;
+                        }
+                        let resolution = resolver.resolve_link_target(&link.target, source);
+                        if let crate::ResolveResult::Resolved(target) = resolution {
+                            referenced.insert(target);
+                        }
+                    }
+                }
+
+                for file in self.files.values() {
+                    if file.kind != FileKind::Attachment {
+                        continue;
+                    }
+                    let Some(scope) = schema.scope_for_path(&file.path) else {
+                        continue;
+                    };
+                    let Some(severity) = scope.orphan_attachments.clone() else {
+                        continue;
+                    };
+                    if referenced.contains(&file.path) {
+                        continue;
+                    }
+                    violations.push(SchemaViolationRecord {
+                        path: Some(file.path.clone()),
+                        violation: SchemaViolation {
+                            severity,
+                            code: "attachment_orphaned".to_string(),
+                            message: format!(
+                                "attachment '{}' has no inbound links",
+                                file.path.as_str_lossy()
+                            ),
+                            scope_id: Some(scope.id.clone()),
+                            rule_id: None,
+                        },
+                    });
+                }
             }
         }
 
