@@ -2,9 +2,15 @@ use std::time::Instant;
 use tracing::{debug, info};
 use zerocopy::AsBytes;
 
-use crate::embeddings::EmbeddingModel;
+use crate::embeddings::{EmbeddingModel, clean_markdown_for_embedding};
 use crate::sqlite::SqliteIndexStore;
 use crate::{Error, Result, Vault, VaultIndex, VaultPath};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticSearchHit {
+    pub path: VaultPath,
+    pub score: f32,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoteSimilarityHit {
@@ -24,6 +30,97 @@ pub struct NoteSimilarityReport {
 pub struct SimilaritySettings {
     pub min_score: f32,
     pub top_k: usize,
+}
+
+pub(crate) fn search_content_semantic(
+    index: &VaultIndex,
+    vault: &Vault,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SemanticSearchHit>> {
+    let cfg = vault.config();
+    search_content_semantic_with_min_score(index, vault, query, limit, cfg.similarity_min_score)
+}
+
+pub(crate) fn search_content_semantic_with_min_score(
+    index: &VaultIndex,
+    vault: &Vault,
+    query: &str,
+    limit: usize,
+    min_score: f32,
+) -> Result<Vec<SemanticSearchHit>> {
+    if query.trim().is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    if !(0.0..=1.0).contains(&min_score) {
+        return Err(Error::Embedding(format!(
+            "semantic search invalid min_score: {}",
+            min_score
+        )));
+    }
+
+    let cfg = vault.config();
+    let note_count = index.notes_iter_paths().count();
+    let start = Instant::now();
+    info!(
+        query_len = query.trim().len(),
+        limit, min_score, note_count, "semantic search"
+    );
+    debug!(
+        limit,
+        min_score,
+        note_count,
+        max_notes = cfg.similarity_max_notes,
+        max_length = cfg.embedding_max_length,
+        "semantic search start"
+    );
+
+    if note_count > cfg.similarity_max_notes {
+        return Err(Error::Embedding(format!(
+            "semantic search aborted: {} notes exceeds limit {}",
+            note_count, cfg.similarity_max_notes
+        )));
+    }
+
+    let model = EmbeddingModel::load_cached(vault)?;
+    let mut store = SqliteIndexStore::open_default(vault)?;
+    let embed_start = Instant::now();
+    store.ensure_embeddings(vault, index, model.as_ref())?;
+    debug!(
+        elapsed_ms = embed_start.elapsed().as_millis(),
+        "semantic search embeddings ready"
+    );
+
+    let cleaned_query = clean_markdown_for_embedding(query);
+    if cleaned_query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query_embedding = model.embed_text(&cleaned_query)?;
+    let candidates = store.knn_for_embedding(query_embedding.as_bytes(), limit)?;
+    let candidate_count = candidates.len();
+    let mut hits = Vec::new();
+    for (path, distance) in candidates {
+        let score = distance_to_cosine(distance);
+        if score < min_score {
+            continue;
+        }
+        hits.push(SemanticSearchHit { path, score });
+    }
+
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    debug!(
+        hit_count = hits.len(),
+        candidate_count,
+        elapsed_ms = start.elapsed().as_millis(),
+        "semantic search complete"
+    );
+    Ok(hits)
 }
 
 pub(crate) fn note_similarity_report(

@@ -526,6 +526,29 @@ impl VaultIndex {
         crate::similarity::note_similarity_for(self, vault, source)
     }
 
+    #[cfg(feature = "similarity")]
+    pub fn search_content_semantic(
+        &self,
+        vault: &Vault,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::SemanticSearchHit>> {
+        crate::similarity::search_content_semantic(self, vault, query, limit)
+    }
+
+    #[cfg(feature = "similarity")]
+    pub fn search_content_semantic_with_min_score(
+        &self,
+        vault: &Vault,
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<crate::SemanticSearchHit>> {
+        crate::similarity::search_content_semantic_with_min_score(
+            self, vault, query, limit, min_score,
+        )
+    }
+
     pub fn resolved_outgoing_internal_links(
         &self,
         source: &VaultPath,

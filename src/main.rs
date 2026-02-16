@@ -96,7 +96,7 @@ enum Command {
         #[command(subcommand)]
         command: ReportCommand,
     },
-    /// Fuzzy search by filename or note content.
+    /// Search by filename, note content, or embeddings.
     Search {
         #[command(subcommand)]
         command: SearchCommand,
@@ -264,6 +264,20 @@ enum SearchCommand {
         /// Maximum number of results.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Semantic search by note embeddings.
+    Semantic {
+        /// Query string.
+        #[arg(long)]
+        query: String,
+
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Minimum similarity score.
+        #[arg(long)]
+        min_score: Option<f32>,
     },
 }
 
@@ -801,6 +815,12 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
 }
 
 async fn handle_search(vault: Option<PathBuf>, command: SearchCommand) -> anyhow::Result<()> {
+    #[cfg(not(feature = "similarity"))]
+    if matches!(&command, SearchCommand::Semantic { .. }) {
+        eprintln!("This command requires --features similarity");
+        return Ok(());
+    }
+
     let vault = Vault::open(require_vault(vault)?)?;
     let service = VaultService::new(vault)?;
     service.build_index().await?;
@@ -822,6 +842,32 @@ async fn handle_search(vault: Option<PathBuf>, command: SearchCommand) -> anyhow
                     hit.line,
                     hit.line_text.trim()
                 );
+            }
+        }
+        SearchCommand::Semantic {
+            query,
+            limit,
+            min_score,
+        } => {
+            #[cfg(feature = "similarity")]
+            {
+                let hits = if let Some(score) = min_score {
+                    service
+                        .search_content_semantic_with_min_score(&query, limit, score)
+                        .await?
+                } else {
+                    service.search_content_semantic(&query, limit).await?
+                };
+                for hit in hits {
+                    println!("{:.3}\t{}", hit.score, hit.path.as_str_lossy());
+                }
+            }
+
+            #[cfg(not(feature = "similarity"))]
+            {
+                let _ = query;
+                let _ = limit;
+                let _ = min_score;
             }
         }
     }

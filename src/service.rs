@@ -126,6 +126,37 @@ impl VaultService {
             .map_err(|e| Error::InvalidVaultPath(format!("search task failed: {e}")))?
     }
 
+    #[cfg(feature = "similarity")]
+    pub async fn search_content_semantic(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::SemanticSearchHit>> {
+        let snapshot = self.index_snapshot();
+        let vault = self.vault.clone();
+        let q = query.to_string();
+        tokio::task::spawn_blocking(move || snapshot.search_content_semantic(&vault, &q, limit))
+            .await
+            .map_err(|e| Error::InvalidVaultPath(format!("semantic search task failed: {e}")))?
+    }
+
+    #[cfg(feature = "similarity")]
+    pub async fn search_content_semantic_with_min_score(
+        &self,
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<crate::SemanticSearchHit>> {
+        let snapshot = self.index_snapshot();
+        let vault = self.vault.clone();
+        let q = query.to_string();
+        tokio::task::spawn_blocking(move || {
+            snapshot.search_content_semantic_with_min_score(&vault, &q, limit, min_score)
+        })
+        .await
+        .map_err(|e| Error::InvalidVaultPath(format!("semantic search task failed: {e}")))?
+    }
+
     pub fn query(&self, q: &crate::Query) -> Vec<crate::QueryHit> {
         self.with_index(|idx| idx.query(q))
     }

@@ -42,7 +42,9 @@ pub use crate::schema::{
 };
 pub use crate::service::{ReindexCause, VaultEvent, VaultService, WatchKind};
 #[cfg(feature = "similarity")]
-pub use crate::similarity::{NoteSimilarityHit, NoteSimilarityReport, SimilaritySettings};
+pub use crate::similarity::{
+    NoteSimilarityHit, NoteSimilarityReport, SemanticSearchHit, SimilaritySettings,
+};
 #[cfg(feature = "sqlite")]
 pub use crate::sqlite::SqliteIndexStore;
 pub use crate::vault::{Vault, VaultPath};
