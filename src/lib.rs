@@ -18,6 +18,8 @@ mod similarity;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 mod vault;
+#[cfg(feature = "web-ui")]
+pub mod web_ui;
 
 pub use crate::config::VaultConfig;
 pub use crate::error::{Error, Result};

@@ -1,0 +1,33 @@
+version = 1
+
+[node]
+types = [
+  "concept",
+  "doc",
+]
+
+[node.type.docs]
+concept = "Concepts"
+doc = "Notes, docs, pages, specs"
+
+[predicates.aliases]
+requires = "depends_on"
+
+[predicates.depends_on]
+description = "A requires B."
+domain = ["concept"]
+severity = "error"
+
+[vault]
+scope_resolution = "most_specific"
+unscoped = "allow"
+
+[[vault.scopes]]
+id = "people"
+path = "people"
+required = true
+unmatched_files = "warn"
+
+[[vault.scopes.allow]]
+id = "people_md"
+glob = "**/*.md"

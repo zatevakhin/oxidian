@@ -1,30 +1,67 @@
+//! Embeddable web UI for real-time vault graph visualization.
+//!
+//! # Usage from an external crate
+//!
+//! ```rust,ignore
+//! use oxidian::{Vault, VaultService, web_ui::{self, WebUiConfig}};
+//!
+//! let vault = Vault::open("/path/to/vault")?;
+//! let mut service = VaultService::new(vault)?;
+//! service.build_index().await?;
+//! service.start_watching().await?;
+//!
+//! // blocking
+//! web_ui::run(service, WebUiConfig::default()).await?;
+//!
+//! // or spawned in the background
+//! let handle = web_ui::spawn(service, WebUiConfig::default()).await?;
+//! // ... do other work ...
+//! handle.await??;
+//! ```
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::header;
-use axum::response::{Html, IntoResponse};
+use axum::extract::{Path as AxumPath, State};
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{info, warn};
 
-use oxidian::{FileKind, GraphIndex, Vault, VaultIndex, VaultPath, VaultService};
+use crate::{FileKind, GraphIndex, VaultIndex, VaultPath, VaultService};
 #[cfg(feature = "similarity")]
-use oxidian::{NoteSimilarityHit, SimilaritySettings};
+use crate::{NoteSimilarityHit, SimilaritySettings};
 
-const INDEX_HTML: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/web-ui/index.html"
-));
-const APP_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/web-ui/app.js"));
+const INDEX_HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/dist/index.html"));
+
+#[derive(RustEmbed)]
+#[folder = "ui/dist"]
+struct UiAssets;
 
 const DEFAULT_SIMILARITY_MIN_SCORE: f32 = 0.6;
 const DEFAULT_SIMILARITY_TOP_K: usize = 8;
+
+/// Configuration for the web UI server.
+#[derive(Debug, Clone)]
+pub struct WebUiConfig {
+    /// Socket address to bind the HTTP server to.
+    pub bind: SocketAddr,
+}
+
+impl Default for WebUiConfig {
+    fn default() -> Self {
+        Self {
+            bind: ([127, 0, 0, 1], 7878).into(),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -91,42 +128,96 @@ impl Default for SimilarityConfig {
     }
 }
 
-pub async fn run(vault_path: PathBuf, bind: SocketAddr) -> anyhow::Result<()> {
-    let vault = Vault::open(&vault_path)?;
-    let mut service = VaultService::new(vault)?;
-    info!(path = %vault_path.display(), "building index for web ui");
-    service.build_index().await?;
-    info!(path = %vault_path.display(), "starting watcher for web ui");
-    service.start_watching().await?;
+/// Resolve an on-disk static directory for the UI, allowing overrides
+/// during development. Falls back to embedded assets when unset.
+fn resolve_static_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("OXIDIAN_WEB_DIR") {
+        let path = PathBuf::from(&dir);
+        if path.is_dir() {
+            info!(dir = %path.display(), "serving UI assets from OXIDIAN_WEB_DIR");
+            return Some(path);
+        }
+        warn!(
+            dir = %path.display(),
+            "OXIDIAN_WEB_DIR is not a directory; using embedded assets"
+        );
+    }
+    None
+}
 
+fn build_router(state: AppState) -> Router {
+    let mut app = Router::new()
+        .route("/", get(index_handler))
+        .route("/ws", get(ws_handler));
+
+    if let Some(dir) = resolve_static_dir() {
+        app = app.nest_service("/static", tower_http::services::ServeDir::new(dir));
+    } else {
+        app = app.route("/static/*path", get(static_handler));
+    }
+
+    app.with_state(state)
+}
+
+/// Starts the web UI server and blocks until it shuts down.
+///
+/// The caller is responsible for opening the vault, building the index,
+/// and starting the file watcher before calling this function.
+pub async fn run(service: VaultService, config: WebUiConfig) -> anyhow::Result<()> {
     let state = AppState {
         service: Arc::new(Mutex::new(service)),
     };
 
-    let app = Router::new()
-        .route("/", get(index_handler))
-        .route("/app.js", get(app_js_handler))
-        .route("/ws", get(ws_handler))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    info!(%bind, "web ui listening");
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    info!(bind = %config.bind, "web ui listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Spawns the web UI server as a background tokio task.
+///
+/// Binds the TCP listener eagerly (errors are returned immediately),
+/// then spawns the server loop and returns the [`tokio::task::JoinHandle`].
+///
+/// The caller is responsible for opening the vault, building the index,
+/// and starting the file watcher before calling this function.
+pub async fn spawn(
+    service: VaultService,
+    config: WebUiConfig,
+) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
+    let state = AppState {
+        service: Arc::new(Mutex::new(service)),
+    };
+
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    info!(bind = %config.bind, "web ui listening (spawned)");
+
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await?;
+        Ok(())
+    });
+
+    Ok(handle)
 }
 
 async fn index_handler() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-async fn app_js_handler() -> impl IntoResponse {
-    (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        APP_JS,
-    )
+async fn static_handler(AxumPath(path): AxumPath<String>) -> Response {
+    let p = path.trim_start_matches('/');
+    if p.is_empty() || p.contains("..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let Some(file) = UiAssets::get(p) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let mime = mime_guess::from_path(p).first_or_octet_stream();
+    ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response()
 }
 
 async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -490,6 +581,7 @@ fn cluster_ids_from_hits(note_ids: &[String], hits: &[NoteSimilarityHit]) -> BTr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Vault;
 
     #[test]
     fn graph_payload_tracks_resolved_edges() {

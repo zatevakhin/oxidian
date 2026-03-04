@@ -16,9 +16,6 @@ use oxidian::{
 #[cfg(feature = "similarity")]
 use oxidian::VaultConfig;
 
-#[cfg(feature = "web-ui")]
-mod web_ui;
-
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LinkKindArg {
     Wiki,
@@ -1119,7 +1116,12 @@ async fn handle_schema(vault: Option<PathBuf>, command: SchemaCommand) -> anyhow
 async fn handle_web_ui(vault: Option<PathBuf>, bind: SocketAddr) -> anyhow::Result<()> {
     init_web_ui_logging();
     let vault_path = require_vault(vault)?;
-    web_ui::run(vault_path, bind).await
+    let vault = Vault::open(&vault_path)?;
+    let mut service = VaultService::new(vault)?;
+    service.build_index().await?;
+    service.start_watching().await?;
+    let config = oxidian::web_ui::WebUiConfig { bind };
+    oxidian::web_ui::run(service, config).await
 }
 
 #[cfg(feature = "web-ui")]

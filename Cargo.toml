@@ -1,6 +1,6 @@
 [package]
 name = "oxidian"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 
 [dependencies]
@@ -12,6 +12,9 @@ serde = { version = "1", features = ["derive"] }
 regex = "1"
 toml = "0.8"
 axum = { version = "0.7", optional = true, features = ["ws"] }
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
+tower-http = { version = "0.6", optional = true, features = ["fs"] }
 serde_yaml = "0.9"
 thiserror = "2"
 tracing = "0.1"
@@ -44,7 +47,7 @@ similarity = [
     "dep:ureq",
     "dep:zerocopy",
 ]
-web-ui = ["dep:axum", "dep:serde_json", "dep:tracing-subscriber"]
+web-ui = ["dep:axum", "dep:serde_json", "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess", "dep:tower-http"]
 
 [dev-dependencies]
 tempfile = "3"

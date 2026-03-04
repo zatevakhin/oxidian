@@ -372,16 +372,14 @@ impl Schema {
             let allowed = allow_rules
                 .iter()
                 .any(|rule| rule_matches(rule, &rel_within));
-            if !allowed {
-                if let Some(severity) = scope.unmatched_files.as_severity() {
-                    out.push(SchemaViolation {
-                        severity,
-                        code: "layout_unmatched".to_string(),
-                        message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
-                        scope_id: Some(scope.id.clone()),
-                        rule_id: None,
-                    });
-                }
+            if !allowed && let Some(severity) = scope.unmatched_files.as_severity() {
+                out.push(SchemaViolation {
+                    severity,
+                    code: "layout_unmatched".to_string(),
+                    message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
+                    scope_id: Some(scope.id.clone()),
+                    rule_id: None,
+                });
             }
         }
 
@@ -656,13 +654,13 @@ impl Schema {
         let note_type = extract_note_type(fields);
         let mut matches = false;
 
-        if !require_any.types.is_empty() {
-            if let Some(note_type) = note_type.as_deref() {
-                matches = require_any
-                    .types
-                    .iter()
-                    .any(|t| t.eq_ignore_ascii_case(note_type));
-            }
+        if !require_any.types.is_empty()
+            && let Some(note_type) = note_type.as_deref()
+        {
+            matches = require_any
+                .types
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(note_type));
         }
 
         if !matches && !require_any.tags.is_empty() {
@@ -703,13 +701,10 @@ impl Schema {
             }
         }
 
-        let Some(scope) = matches
+        let scope = matches
             .iter()
             .max_by_key(|s| normalized_path(&s.path).len())
-            .copied()
-        else {
-            return None;
-        };
+            .copied()?;
 
         let mut ancestors = matches
             .into_iter()
@@ -913,8 +908,8 @@ fn glob_to_regex(pattern: &str) -> std::result::Result<Regex, regex::Error> {
         }
         prev_globstar = false;
 
-        let mut chars = segment.chars().peekable();
-        while let Some(ch) = chars.next() {
+        let chars = segment.chars();
+        for ch in chars {
             match ch {
                 '*' => regex.push_str("[^/]*"),
                 '?' => regex.push_str("[^/]"),
@@ -958,6 +953,7 @@ struct TemplatePattern {
     vars: Vec<String>,
 }
 
+#[allow(clippy::while_let_on_iterator)]
 fn compile_template(template: &str) -> std::result::Result<TemplatePattern, String> {
     let mut regex = String::from("^");
     let mut vars = Vec::new();
@@ -965,7 +961,7 @@ fn compile_template(template: &str) -> std::result::Result<TemplatePattern, Stri
     while let Some(ch) = chars.next() {
         if ch == '{' {
             let mut token = String::new();
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if next == '}' {
                     break;
                 }

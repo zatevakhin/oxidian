@@ -9,3 +9,7 @@ target
 # nix
 result
 result-*
+
+# ui build artifacts
+ui/node_modules
+ui/dist
