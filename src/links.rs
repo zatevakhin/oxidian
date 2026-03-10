@@ -1,4 +1,5 @@
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LinkKind {
     Wiki,
     Markdown,
@@ -6,26 +7,28 @@ pub enum LinkKind {
     ObsidianUri,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LinkTarget {
     Internal { reference: String },
     ExternalUrl(String),
     ObsidianUri { raw: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Subpath {
     Heading(String),
     Block(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct LinkLocation {
     pub line: u32,
     pub column: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct Link {
     pub kind: LinkKind,
     pub embed: bool,
@@ -36,7 +39,8 @@ pub struct Link {
     pub raw: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LinkIssueReason {
     MissingTarget,
     AmbiguousTarget { candidates: Vec<crate::VaultPath> },
@@ -44,27 +48,27 @@ pub enum LinkIssueReason {
     MissingBlock { block: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LinkIssue {
     pub source: crate::VaultPath,
     pub link: Link,
     pub reason: LinkIssueReason,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LinkHealthReport {
     pub total_internal_occurrences: usize,
     pub ok: usize,
     pub broken: Vec<LinkIssue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Backlink {
     pub source: crate::VaultPath,
     pub link: Link,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct BacklinksIndex {
     pub unresolved: usize,
     pub ambiguous: usize,

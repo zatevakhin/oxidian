@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::{Error, Vault, VaultIndex, VaultPath};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UnlinkedMention {
     pub source: VaultPath,
     pub target: VaultPath,

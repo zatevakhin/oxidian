@@ -18,7 +18,8 @@ use crate::{
     SchemaStatus, SchemaViolation, SchemaViolationRecord, Vault, VaultPath,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileKind {
     Markdown,
     Canvas,
@@ -28,6 +29,15 @@ pub enum FileKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tag(pub String);
+
+impl serde::Serialize for Tag {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
 
 pub use crate::links::LinkTarget;
 
@@ -54,7 +64,8 @@ pub struct NoteMeta {
     pub schema_violations: Vec<SchemaViolation>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Todo,
     Done,
@@ -63,7 +74,7 @@ pub enum TaskStatus {
     Blocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Task {
     pub path: VaultPath,
     /// 1-based line number in the file.
@@ -72,14 +83,15 @@ pub struct Task {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FrontmatterStatus {
     None,
     Valid,
     Broken { error: String },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct FrontmatterReport {
     pub none: usize,
     pub valid: usize,
@@ -98,7 +110,7 @@ pub struct VaultIndex {
     schema: Option<Schema>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct IndexDelta {
     pub added_tags: BTreeSet<Tag>,
     pub removed_tags: BTreeSet<Tag>,
@@ -106,13 +118,13 @@ pub struct IndexDelta {
     pub removed_links: BTreeSet<LinkTarget>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SearchHit {
     pub path: VaultPath,
     pub score: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ContentSearchHit {
     pub path: VaultPath,
     pub score: u32,

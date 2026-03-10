@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 #[cfg(feature = "web-ui")]
 use std::net::SocketAddr;
@@ -15,6 +16,70 @@ use oxidian::{
 
 #[cfg(feature = "similarity")]
 use oxidian::VaultConfig;
+
+// ---------------------------------------------------------------------------
+// Output helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
+/// Unified envelope for JSON output.
+#[derive(serde::Serialize)]
+struct JsonEnvelope<T: serde::Serialize> {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonError>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonError {
+    code: String,
+    message: String,
+}
+
+fn emit_json<T: serde::Serialize>(data: &T) {
+    let envelope = JsonEnvelope::<&T> {
+        ok: true,
+        data: Some(data),
+        error: None,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&envelope).expect("json serialization")
+    );
+}
+
+fn emit_json_error(code: &str, message: &str) {
+    let envelope = JsonEnvelope::<()> {
+        ok: false,
+        data: None,
+        error: Some(JsonError {
+            code: code.to_string(),
+            message: message.to_string(),
+        }),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&envelope).expect("json serialization")
+    );
+}
+
+/// Emit a progress message to stderr, unless `--quiet` is set.
+fn progress(quiet: bool, msg: &str) {
+    if !quiet {
+        eprintln!("{msg}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLI argument types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LinkKindArg {
@@ -44,6 +109,18 @@ enum StatusArg {
     Blocked,
 }
 
+impl From<StatusArg> for TaskStatus {
+    fn from(value: StatusArg) -> Self {
+        match value {
+            StatusArg::Todo => TaskStatus::Todo,
+            StatusArg::Done => TaskStatus::Done,
+            StatusArg::InProgress => TaskStatus::InProgress,
+            StatusArg::Cancelled => TaskStatus::Cancelled,
+            StatusArg::Blocked => TaskStatus::Blocked,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SchemaSeverityArg {
     Warn,
@@ -59,28 +136,38 @@ impl From<SchemaSeverityArg> for SchemaSeverity {
     }
 }
 
-impl From<StatusArg> for TaskStatus {
-    fn from(value: StatusArg) -> Self {
-        match value {
-            StatusArg::Todo => TaskStatus::Todo,
-            StatusArg::Done => TaskStatus::Done,
-            StatusArg::InProgress => TaskStatus::InProgress,
-            StatusArg::Cancelled => TaskStatus::Cancelled,
-            StatusArg::Blocked => TaskStatus::Blocked,
-        }
-    }
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SearchMode {
+    Files,
+    Content,
+    Semantic,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SchemaTemplate {
+    Para,
+    Kg,
+    KgMemory,
+}
+
+// ---------------------------------------------------------------------------
+// CLI structure
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Parser)]
-#[command(
-    name = "oxidian",
-    version,
-    about = "Obsidian vault indexing + query CLI"
-)]
+#[command(name = "oxi", version, about = "Obsidian vault indexing + query CLI")]
 struct Cli {
     /// Path to the Obsidian vault.
     #[arg(long, env = "OBSIDIAN_VAULT", global = true)]
     vault: Option<PathBuf>,
+
+    /// Output format.
+    #[arg(long, short = 'o', global = true, value_enum, default_value = "text")]
+    output: OutputFormat,
+
+    /// Suppress progress messages on stderr.
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -88,62 +175,71 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Reports and summaries.
-    Report {
-        #[command(subcommand)]
-        command: ReportCommand,
-    },
-    /// Search by filename, note content, or embeddings.
+    // ── Querying / Reading ──────────────────────────────────
+    /// Search notes by filename, content, or embeddings.
     Search {
-        #[command(subcommand)]
-        command: SearchCommand,
-    },
-    /// Dataview-like querying via typed API.
-    Query(QueryCommand),
-    /// Watch a vault and print indexing events.
-    Watch {
-        #[command(subcommand)]
-        command: WatchCommand,
-    },
-    /// Persist the index to SQLite and incrementally update.
-    Sqlite {
-        #[command(subcommand)]
-        command: SqliteCommand,
-    },
-    /// Note similarity neighbors.
-    Similarity {
-        #[command(subcommand)]
-        command: SimilarityCommand,
-    },
-    /// Serve a realtime graph UI over HTTP.
-    #[cfg(feature = "web-ui")]
-    #[command(name = "web-ui")]
-    WebUi {
-        /// Bind address for the web server.
-        #[arg(long, default_value = "127.0.0.1:7878")]
-        bind: SocketAddr,
-    },
-    /// Schema utilities.
-    Schema {
-        #[command(subcommand)]
-        command: SchemaCommand,
-    },
-}
+        /// Query string.
+        query: String,
 
-#[derive(Debug, Subcommand)]
-enum ReportCommand {
-    /// Print file/note/tag counts.
-    Stats {
-        /// Optional tag to query for matching files.
+        /// Search mode.
+        #[arg(long, value_enum, default_value = "files")]
+        mode: SearchMode,
+
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Minimum similarity score (semantic mode only).
+        #[arg(long)]
+        min_score: Option<f32>,
+    },
+
+    /// Dataview-like querying of notes.
+    Query {
+        /// Limit results to paths with this prefix.
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Limit results to notes with this tag.
         #[arg(long)]
         tag: Option<String>,
+
+        /// Require that a field exists (repeatable).
+        #[arg(long)]
+        exists: Vec<String>,
+
+        /// Field equals (repeatable): key=value.
+        #[arg(long)]
+        eq: Vec<String>,
+
+        /// Field contains substring (repeatable): key=value.
+        #[arg(long)]
+        contains: Vec<String>,
+
+        /// Field numeric greater-than (repeatable): key=value.
+        #[arg(long)]
+        gt: Vec<String>,
+
+        /// Sort by field name.
+        #[arg(long)]
+        sort: Option<String>,
+
+        /// Sort descending.
+        #[arg(long)]
+        desc: bool,
+
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
     },
-    /// Print tags with file counts.
+
+    /// List tags with file counts.
     Tags {
         /// How many tags to print.
         #[arg(long, default_value_t = 50)]
         top: usize,
     },
+
     /// List indexed tasks.
     Tasks {
         /// Optional path prefix.
@@ -162,11 +258,12 @@ enum ReportCommand {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
-    /// List links and link occurrences.
+
+    // ── Per-note inspection ─────────────────────────────────
+    /// Show outgoing links for a note.
     Links {
-        /// Optional note path (relative to vault) to inspect.
-        #[arg(long)]
-        note: Option<PathBuf>,
+        /// Note path (relative to vault).
+        note: PathBuf,
 
         /// Filter by link kind.
         #[arg(long, value_enum)]
@@ -176,60 +273,102 @@ enum ReportCommand {
         #[arg(long)]
         only_embeds: bool,
     },
-    /// Show resolved inbound links (backlinks).
+
+    /// Show inbound links (backlinks) to a note.
     Backlinks {
-        /// Target note path (relative) or name to resolve.
-        #[arg(long)]
+        /// Target note path or name.
         note: String,
     },
-    /// Find plain-text (unlinked) mentions of a target note.
+
+    /// Find plain-text (unlinked) mentions of a note.
     Mentions {
         /// Target note path (relative to vault).
-        #[arg(long)]
         note: PathBuf,
 
         /// Maximum number of results.
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
-    /// Graph issues and outgoing links.
-    Graph {
-        /// Source note path (relative to vault) to show outgoing internal links.
-        #[arg(long)]
-        note: Option<PathBuf>,
-    },
-    /// Audit internal links for missing/ambiguous targets and missing subpaths.
-    LinkHealth {
-        /// Print broken links.
-        #[arg(long)]
-        show_broken: bool,
-    },
-    /// Audit frontmatter across the vault.
-    Frontmatter {
-        /// Print paths for notes without frontmatter.
-        #[arg(long)]
-        show_missing: bool,
 
-        /// Print paths for notes with broken frontmatter.
-        #[arg(long)]
-        show_broken: bool,
-    },
-    /// Full similarity report.
-    Similarity {
+    /// Find similar notes (embedding neighbors).
+    Neighbors {
+        /// Note path (relative to vault).
+        note: PathBuf,
+
         /// Minimum similarity score.
         #[arg(long)]
         min_score: Option<f32>,
 
-        /// Maximum neighbors per note.
+        /// Maximum neighbors.
         #[arg(long)]
         top_k: Option<usize>,
     },
-    /// Schema validation report.
-    Schema {
-        /// Print all schema violations.
-        #[arg(long)]
-        show_violations: bool,
 
+    // ── Vault-wide inspection ───────────────────────────────
+    /// Print vault statistics (file, note, tag counts).
+    Stats {
+        /// Optional tag to query for matching files.
+        #[arg(long)]
+        tag: Option<String>,
+    },
+
+    /// Graph summary and outgoing links.
+    Graph {
+        /// Source note path to show outgoing internal links.
+        #[arg(long)]
+        note: Option<PathBuf>,
+    },
+
+    // ── Auditing / Linting ──────────────────────────────────
+    /// Audit and lint the vault.
+    Check {
+        #[command(subcommand)]
+        command: CheckCommand,
+    },
+
+    // ── Infrastructure ──────────────────────────────────────
+    /// Stream vault change events.
+    Watch,
+
+    /// Persist the index to SQLite and incrementally update.
+    Persist {
+        /// Optional SQLite DB path.
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+
+    /// Schema utilities.
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommand,
+    },
+
+    /// Serve a realtime graph UI over HTTP.
+    #[cfg(feature = "web-ui")]
+    #[command(name = "web-ui")]
+    WebUi {
+        /// Bind address for the web server.
+        #[arg(long, default_value = "127.0.0.1:7878")]
+        bind: SocketAddr,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CheckCommand {
+    /// Audit internal links for missing/ambiguous targets.
+    Links {
+        /// Maximum number of issues to print.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Audit frontmatter across the vault.
+    Frontmatter {
+        /// Maximum number of issues to print.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Validate vault against its schema.
+    Schema {
         /// Filter by severity.
         #[arg(long, value_enum)]
         severity: Option<SchemaSeverityArg>,
@@ -238,109 +377,8 @@ enum ReportCommand {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum SearchCommand {
-    /// Search by filename.
-    Files {
-        /// Query string.
-        #[arg(long)]
-        query: String,
-
-        /// Maximum number of results.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
-    /// Search by note content.
-    Content {
-        /// Query string.
-        #[arg(long)]
-        query: String,
-
-        /// Maximum number of results.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
-    /// Semantic search by note embeddings.
-    Semantic {
-        /// Query string.
-        #[arg(long)]
-        query: String,
-
-        /// Maximum number of results.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-
-        /// Minimum similarity score.
-        #[arg(long)]
-        min_score: Option<f32>,
-    },
-}
-
-#[derive(Debug, Parser)]
-struct QueryCommand {
-    /// Limit results to paths with this prefix.
-    #[arg(long)]
-    prefix: Option<String>,
-
-    /// Limit results to notes with this tag.
-    #[arg(long)]
-    tag: Option<String>,
-
-    /// Require that a field exists (repeatable).
-    #[arg(long)]
-    exists: Vec<String>,
-
-    /// Field equals (repeatable): key=value.
-    #[arg(long)]
-    eq: Vec<String>,
-
-    /// Field contains substring (repeatable): key=value.
-    #[arg(long)]
-    contains: Vec<String>,
-
-    /// Field numeric greater-than (repeatable): key=value.
-    #[arg(long)]
-    gt: Vec<String>,
-
-    /// Sort by field name.
-    #[arg(long)]
-    sort_field: Option<String>,
-
-    /// Sort descending.
-    #[arg(long)]
-    desc: bool,
-
-    /// Maximum number of results.
-    #[arg(long, default_value_t = 50)]
-    limit: usize,
-}
-
-#[derive(Debug, Subcommand)]
-enum WatchCommand {
-    /// Stream indexing events.
-    Index,
-}
-
-#[derive(Debug, Subcommand)]
-enum SqliteCommand {
-    /// Persist the index to SQLite and incrementally update.
-    Persist {
-        /// Optional SQLite DB path.
-        #[arg(long)]
-        db: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum SimilarityCommand {
-    /// Similar notes for a specific note.
-    Neighbors {
-        /// Relative note path to list neighbors for.
-        #[arg(long)]
-        note: PathBuf,
-
+    /// Full similarity report across the vault.
+    Similarity {
         /// Minimum similarity score.
         #[arg(long)]
         min_score: Option<f32>,
@@ -365,25 +403,183 @@ enum SchemaCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum SchemaTemplate {
-    Para,
-    Kg,
-    KgMemory,
+// ---------------------------------------------------------------------------
+// JSON-serializable output structs
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct StatsOutput {
+    files: usize,
+    notes: usize,
+    tags: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag_filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tagged_files: Option<Vec<String>>,
 }
+
+#[derive(serde::Serialize)]
+struct TagCount {
+    tag: String,
+    count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct LinksOutput {
+    note: String,
+    unique_targets: usize,
+    occurrences: usize,
+    links: Vec<oxidian::Link>,
+}
+
+#[derive(serde::Serialize)]
+struct BacklinksOutput {
+    target: String,
+    count: usize,
+    backlinks: Vec<oxidian::Backlink>,
+    unresolved_internal_occurrences: usize,
+    ambiguous_internal_occurrences: usize,
+}
+
+#[derive(serde::Serialize)]
+struct MentionsOutput {
+    count: usize,
+    mentions: Vec<oxidian::UnlinkedMention>,
+}
+
+#[derive(serde::Serialize)]
+struct GraphOutput {
+    unresolved_internal_occurrences: usize,
+    ambiguous_internal_occurrences: usize,
+    issue_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outgoing: Option<Vec<oxidian::ResolvedInternalLink>>,
+}
+
+#[derive(serde::Serialize)]
+struct LinkHealthOutput {
+    internal_occurrences: usize,
+    ok: usize,
+    broken_count: usize,
+    broken: Vec<oxidian::LinkIssue>,
+}
+
+#[derive(serde::Serialize)]
+struct FrontmatterOutput {
+    notes_without_frontmatter: usize,
+    notes_with_frontmatter_valid: usize,
+    notes_with_frontmatter_broken: usize,
+    missing: Vec<String>,
+    broken: Vec<FrontmatterBroken>,
+}
+
+#[derive(serde::Serialize)]
+struct FrontmatterBroken {
+    path: String,
+    error: String,
+}
+
+#[derive(serde::Serialize)]
+struct SchemaCheckOutput {
+    status: oxidian::SchemaStatus,
+    errors: usize,
+    warnings: usize,
+    total_violations: usize,
+    violations: Vec<oxidian::SchemaViolationRecord>,
+}
+
+#[derive(serde::Serialize)]
+struct SchemaInitOutput {
+    path: String,
+    template: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(serde::Serialize)]
+struct PersistOutput {
+    files: usize,
+    notes: usize,
+    tags: usize,
+    tasks: usize,
+    links: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let fmt = cli.output;
+
+    let result = run(cli).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if matches!(fmt, OutputFormat::Json) {
+                emit_json_error("error", &e.to_string());
+                std::process::exit(1);
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
+    let fmt = cli.output;
+    let quiet = cli.quiet;
 
     match cli.command {
-        Command::Report { command } => handle_report(cli.vault, command).await?,
-        Command::Search { command } => handle_search(cli.vault, command).await?,
-        Command::Query(command) => handle_query(cli.vault, command).await?,
-        Command::Watch { command } => handle_watch(cli.vault, command).await?,
-        Command::Sqlite { command } => handle_sqlite(cli.vault, command).await?,
-        Command::Similarity { command } => handle_similarity(cli.vault, command).await?,
-        Command::Schema { command } => handle_schema(cli.vault, command).await?,
+        Command::Search {
+            query,
+            mode,
+            limit,
+            min_score,
+        } => handle_search(cli.vault, fmt, quiet, query, mode, limit, min_score).await?,
+        Command::Query {
+            prefix,
+            tag,
+            exists,
+            eq,
+            contains,
+            gt,
+            sort,
+            desc,
+            limit,
+        } => {
+            handle_query(
+                cli.vault, fmt, prefix, tag, exists, eq, contains, gt, sort, desc, limit,
+            )
+            .await?
+        }
+        Command::Tags { top } => handle_tags(cli.vault, fmt, top).await?,
+        Command::Tasks {
+            prefix,
+            status,
+            contains,
+            limit,
+        } => handle_tasks(cli.vault, fmt, prefix, status, contains, limit).await?,
+        Command::Links {
+            note,
+            kind,
+            only_embeds,
+        } => handle_links(cli.vault, fmt, note, kind, only_embeds).await?,
+        Command::Backlinks { note } => handle_backlinks(cli.vault, fmt, note).await?,
+        Command::Mentions { note, limit } => handle_mentions(cli.vault, fmt, note, limit).await?,
+        Command::Neighbors {
+            note,
+            min_score,
+            top_k,
+        } => handle_neighbors(cli.vault, fmt, quiet, note, min_score, top_k).await?,
+        Command::Stats { tag } => handle_stats(cli.vault, fmt, tag).await?,
+        Command::Graph { note } => handle_graph(cli.vault, fmt, note).await?,
+        Command::Check { command } => handle_check(cli.vault, fmt, quiet, command).await?,
+        Command::Watch => handle_watch(cli.vault, fmt, quiet).await?,
+        Command::Persist { db } => handle_persist(cli.vault, fmt, quiet, db).await?,
+        Command::Schema { command } => handle_schema(cli.vault, fmt, command).await?,
         #[cfg(feature = "web-ui")]
         Command::WebUi { bind } => handle_web_ui(cli.vault, bind).await?,
     }
@@ -391,77 +587,187 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow::Result<()> {
-    #[cfg(not(feature = "similarity"))]
-    let similarity_enabled = false;
-    #[cfg(feature = "similarity")]
-    let similarity_enabled = true;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
+fn require_vault(vault: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    vault.ok_or_else(|| anyhow::anyhow!("--vault is required (or set OBSIDIAN_VAULT)"))
+}
+
+async fn open_service(vault: Option<PathBuf>) -> anyhow::Result<VaultService> {
     let vault_path = require_vault(vault)?;
     let vault = Vault::open(&vault_path)?;
     let service = VaultService::new(vault)?;
     service.build_index().await?;
+    Ok(service)
+}
+
+#[cfg(feature = "similarity")]
+async fn open_service_with_similarity(
+    vault: Option<PathBuf>,
+    min_score: Option<f32>,
+    top_k: Option<usize>,
+) -> anyhow::Result<VaultService> {
+    let vault_path = require_vault(vault)?;
+    let mut cfg = VaultConfig::default();
+    if let Some(score) = min_score {
+        cfg.similarity_min_score = score;
+    }
+    if let Some(k) = top_k {
+        cfg.similarity_top_k = k;
+    }
+    let vault = Vault::with_config(&vault_path, cfg)?;
+    let service = VaultService::new(vault)?;
+    service.build_index().await?;
+    Ok(service)
+}
+
+fn normalize_tag_for_query(raw: &str) -> anyhow::Result<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        anyhow::bail!("tag is empty");
+    }
+    let s = s.strip_prefix('#').unwrap_or(s);
+    let s = s.trim_matches('/').trim();
+    if s.is_empty() {
+        anyhow::bail!("tag is empty");
+    }
+    Ok(s.to_lowercase())
+}
+
+fn print_occ(l: &Link) {
+    println!(
+        "- {:?}\tembed={}\t{}:{}\ttarget={:?}\tsubpath={:?}\tdisplay={:?}\traw={:?}",
+        l.kind, l.embed, l.location.line, l.location.column, l.target, l.subpath, l.display, l.raw
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_stats(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    tag: Option<String>,
+) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
     let snapshot = service.index_snapshot();
 
-    match command {
-        ReportCommand::Stats { tag } => {
-            let file_count = snapshot.all_files().count();
-            let note_count = snapshot
-                .all_files()
-                .filter(|f| matches!(f.kind, FileKind::Markdown | FileKind::Canvas))
-                .count();
-            let tag_count = snapshot.all_tags().count();
+    let file_count = snapshot.all_files().count();
+    let note_count = snapshot
+        .all_files()
+        .filter(|f| matches!(f.kind, FileKind::Markdown | FileKind::Canvas))
+        .count();
+    let tag_count = snapshot.all_tags().count();
 
+    let (tag_filter, tagged_files) = if let Some(ref raw_tag) = tag {
+        let t = normalize_tag_for_query(raw_tag)?;
+        let files: Vec<String> = snapshot
+            .files_with_tag(&Tag(t.clone()))
+            .map(|p| p.as_str_lossy())
+            .collect();
+        (Some(t), Some(files))
+    } else {
+        (None, None)
+    };
+
+    match fmt {
+        OutputFormat::Json => {
+            emit_json(&StatsOutput {
+                files: file_count,
+                notes: note_count,
+                tags: tag_count,
+                tag_filter,
+                tagged_files,
+            });
+        }
+        OutputFormat::Text => {
             println!("stats");
             println!("  files: {file_count}");
             println!("  notes: {note_count}");
             println!("  tags: {tag_count}");
 
-            if let Some(tag) = tag {
-                let tag = normalize_tag_for_query(&tag)?;
-                println!("\nfiles with tag #{tag}:");
-                for p in snapshot.files_with_tag(&Tag(tag.clone())) {
-                    println!("- {}", p.as_str_lossy());
+            if let (Some(tag_name), Some(files)) = (&tag_filter, &tagged_files) {
+                println!("\nfiles with tag #{tag_name}:");
+                for p in files {
+                    println!("- {p}");
                 }
             }
         }
-        ReportCommand::Tags { top } => {
-            let mut rows: Vec<(Tag, usize)> = snapshot
-                .all_tags()
-                .cloned()
-                .map(|t| {
-                    let n = snapshot.files_with_tag(&t).count();
-                    (t, n)
+    }
+
+    Ok(())
+}
+
+async fn handle_tags(vault: Option<PathBuf>, fmt: OutputFormat, top: usize) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
+    let snapshot = service.index_snapshot();
+
+    let mut rows: Vec<(Tag, usize)> = snapshot
+        .all_tags()
+        .cloned()
+        .map(|t| {
+            let n = snapshot.files_with_tag(&t).count();
+            (t, n)
+        })
+        .collect();
+
+    rows.sort_by(|(a_tag, a_n), (b_tag, b_n)| b_n.cmp(a_n).then_with(|| a_tag.0.cmp(&b_tag.0)));
+    let rows: Vec<(Tag, usize)> = rows.into_iter().take(top).collect();
+
+    match fmt {
+        OutputFormat::Json => {
+            let items: Vec<TagCount> = rows
+                .iter()
+                .map(|(tag, count)| TagCount {
+                    tag: tag.0.clone(),
+                    count: *count,
                 })
                 .collect();
-
-            rows.sort_by(|(a_tag, a_n), (b_tag, b_n)| {
-                b_n.cmp(a_n).then_with(|| a_tag.0.cmp(&b_tag.0))
-            });
-
-            for (tag, n) in rows.into_iter().take(top) {
+            emit_json(&items);
+        }
+        OutputFormat::Text => {
+            for (tag, n) in &rows {
                 println!("{n}\t#{tag}", tag = tag.0);
             }
         }
-        ReportCommand::Tasks {
-            prefix,
-            status,
-            contains,
-            limit,
-        } => {
-            let mut q = TaskQuery::all();
-            if let Some(prefix) = prefix {
-                q = q.from_path_prefix(prefix);
-            }
-            if let Some(status) = status {
-                q = q.status(status.into());
-            }
-            if let Some(needle) = contains {
-                q = q.contains_text(needle);
-            }
-            q = q.limit(limit);
+    }
 
-            for hit in service.query_tasks(&q) {
+    Ok(())
+}
+
+async fn handle_tasks(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    prefix: Option<String>,
+    status: Option<StatusArg>,
+    contains: Option<String>,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
+
+    let mut q = TaskQuery::all();
+    if let Some(prefix) = prefix {
+        q = q.from_path_prefix(prefix);
+    }
+    if let Some(status) = status {
+        q = q.status(status.into());
+    }
+    if let Some(needle) = contains {
+        q = q.contains_text(needle);
+    }
+    q = q.limit(limit);
+
+    let hits: Vec<oxidian::TaskHit> = service.query_tasks(&q);
+
+    match fmt {
+        OutputFormat::Json => {
+            emit_json(&hits);
+        }
+        OutputFormat::Text => {
+            for hit in &hits {
                 println!(
                     "{:?}\t{}:{}\t{}",
                     hit.status,
@@ -471,112 +777,120 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
                 );
             }
         }
-        ReportCommand::Links {
-            note,
-            kind,
-            only_embeds,
-        } => {
-            if let Some(note) = note {
-                let rel = VaultPath::try_from(note.as_path())?;
-                let note = snapshot
-                    .note(&rel)
-                    .ok_or_else(|| anyhow::anyhow!("note not found: {}", rel.as_str_lossy()))?;
+    }
 
-                println!("note: {}", rel.as_str_lossy());
-                println!("summary");
-                println!("  unique_targets: {}", note.links.len());
-                println!("  occurrences: {}", note.link_occurrences.len());
+    Ok(())
+}
 
-                if !note.links.is_empty() {
-                    println!("\nunique targets:");
-                    for t in &note.links {
-                        println!("- {t:?}");
-                    }
-                }
+async fn handle_links(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    note: PathBuf,
+    kind: Option<LinkKindArg>,
+    only_embeds: bool,
+) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
+    let snapshot = service.index_snapshot();
 
-                let kind_filter = kind.map(Into::into);
-                let occs = note
-                    .link_occurrences
-                    .iter()
-                    .filter(|l| kind_filter.as_ref().is_none_or(|k| &l.kind == k))
-                    .filter(|l| !only_embeds || l.embed);
+    let rel = VaultPath::try_from(note.as_path())?;
+    let note_meta = snapshot
+        .note(&rel)
+        .ok_or_else(|| anyhow::anyhow!("note not found: {}", rel.as_str_lossy()))?;
 
-                println!("\noccurrences:");
-                for l in occs {
-                    print_occ(l);
-                }
+    let kind_filter = kind.map(Into::into);
+    let filtered: Vec<&Link> = note_meta
+        .link_occurrences
+        .iter()
+        .filter(|l| kind_filter.as_ref().is_none_or(|k| &l.kind == k))
+        .filter(|l| !only_embeds || l.embed)
+        .collect();
 
-                return Ok(());
-            }
-
-            let mut total = 0usize;
-            let mut wiki = 0usize;
-            let mut md = 0usize;
-            let mut auto = 0usize;
-            let mut obs_uri = 0usize;
-            let mut embeds = 0usize;
-
-            for f in snapshot.all_files() {
-                let Some(note) = snapshot.note(&f.path) else {
-                    continue;
-                };
-                for l in &note.link_occurrences {
-                    total += 1;
-                    if l.embed {
-                        embeds += 1;
-                    }
-                    match l.kind {
-                        LinkKind::Wiki => wiki += 1,
-                        LinkKind::Markdown => md += 1,
-                        LinkKind::AutoUrl => auto += 1,
-                        LinkKind::ObsidianUri => obs_uri += 1,
-                    }
-                }
-            }
-
-            println!("occurrences");
-            println!("  total: {total}");
-            println!("  embeds: {embeds}");
-            println!("  wiki: {wiki}");
-            println!("  markdown: {md}");
-            println!("  auto-url: {auto}");
-            println!("  obsidian-uri: {obs_uri}");
+    match fmt {
+        OutputFormat::Json => {
+            emit_json(&LinksOutput {
+                note: rel.as_str_lossy(),
+                unique_targets: note_meta.links.len(),
+                occurrences: filtered.len(),
+                links: filtered.into_iter().cloned().collect(),
+            });
         }
-        ReportCommand::Backlinks { note } => {
-            let backlinks = service.build_backlinks()?;
-            let target: VaultPath = if note.contains('/') || note.contains('.') {
-                VaultPath::try_from(Path::new(&note))?
-            } else {
-                let needle = note.to_lowercase();
-                let mut matches = Vec::new();
-                for f in snapshot.all_files() {
-                    let Some(_note) = snapshot.note(&f.path) else {
-                        continue;
-                    };
-                    let Some(stem) = f.path.as_path().file_stem().and_then(|s| s.to_str()) else {
-                        continue;
-                    };
-                    if stem.to_lowercase() == needle {
-                        matches.push(f.path.clone());
-                    }
-                }
-                matches.sort();
-                matches.dedup();
-                match matches.len() {
-                    0 => return Err(anyhow::anyhow!("could not resolve target: {}", note)),
-                    1 => matches.remove(0),
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "ambiguous target '{}': {:?}",
-                            note,
-                            matches
-                        ));
-                    }
-                }
-            };
+        OutputFormat::Text => {
+            println!("note: {}", rel.as_str_lossy());
+            println!("summary");
+            println!("  unique_targets: {}", note_meta.links.len());
+            println!("  occurrences: {}", filtered.len());
 
+            if !note_meta.links.is_empty() {
+                println!("\nunique targets:");
+                for t in &note_meta.links {
+                    println!("- {t:?}");
+                }
+            }
+
+            println!("\noccurrences:");
+            for l in &filtered {
+                print_occ(l);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_backlinks(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    note: String,
+) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
+    let snapshot = service.index_snapshot();
+    let backlinks = service.build_backlinks()?;
+
+    let target: VaultPath = if note.contains('/') || note.contains('.') {
+        VaultPath::try_from(Path::new(&note))?
+    } else {
+        let needle = note.to_lowercase();
+        let mut matches = Vec::new();
+        for f in snapshot.all_files() {
+            let Some(_note) = snapshot.note(&f.path) else {
+                continue;
+            };
+            let Some(stem) = f.path.as_path().file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem.to_lowercase() == needle {
+                matches.push(f.path.clone());
+            }
+        }
+        matches.sort();
+        matches.dedup();
+        match matches.len() {
+            0 => return Err(anyhow::anyhow!("could not resolve target: {}", note)),
+            1 => matches.remove(0),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "ambiguous target '{}': {:?}",
+                    note,
+                    matches
+                ));
+            }
+        }
+    };
+
+    let items = backlinks.backlinks(&target);
+
+    match fmt {
+        OutputFormat::Json => {
+            emit_json(&BacklinksOutput {
+                target: target.as_str_lossy(),
+                count: items.len(),
+                backlinks: items.to_vec(),
+                unresolved_internal_occurrences: backlinks.unresolved,
+                ambiguous_internal_occurrences: backlinks.ambiguous,
+            });
+        }
+        OutputFormat::Text => {
             println!("target: {}", target.as_str_lossy());
-            let items = backlinks.backlinks(&target);
             println!("summary");
             println!("  backlinks: {}", items.len());
             for b in items {
@@ -589,19 +903,38 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
                     b.link.raw
                 );
             }
-
             println!(
                 "  unresolved_internal_occurrences: {}",
                 backlinks.unresolved
             );
             println!("  ambiguous_internal_occurrences: {}", backlinks.ambiguous);
         }
-        ReportCommand::Mentions { note, limit } => {
-            let target = VaultPath::try_from(note.as_path())?;
-            let mentions = service.unlinked_mentions(&target, limit).await?;
+    }
+
+    Ok(())
+}
+
+async fn handle_mentions(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    note: PathBuf,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
+    let target = VaultPath::try_from(note.as_path())?;
+    let mentions = service.unlinked_mentions(&target, limit).await?;
+
+    match fmt {
+        OutputFormat::Json => {
+            emit_json(&MentionsOutput {
+                count: mentions.len(),
+                mentions,
+            });
+        }
+        OutputFormat::Text => {
             println!("summary");
             println!("  mentions: {}", mentions.len());
-            for m in mentions {
+            for m in &mentions {
                 println!(
                     "- {}:{}\tterm={:?}\t{}",
                     m.source.as_str_lossy(),
@@ -611,8 +944,87 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
                 );
             }
         }
-        ReportCommand::Graph { note } => {
-            let graph = service.build_graph()?;
+    }
+
+    Ok(())
+}
+
+async fn handle_neighbors(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    quiet: bool,
+    note: PathBuf,
+    min_score: Option<f32>,
+    top_k: Option<usize>,
+) -> anyhow::Result<()> {
+    #[cfg(not(feature = "similarity"))]
+    {
+        let _ = (vault, fmt, quiet, note, min_score, top_k);
+        anyhow::bail!("This command requires --features similarity");
+    }
+
+    #[cfg(feature = "similarity")]
+    {
+        progress(quiet, "building index...");
+        let service = open_service_with_similarity(vault, min_score, top_k).await?;
+        progress(quiet, "index ready");
+
+        let note_path = VaultPath::try_from(note.as_path())?;
+        progress(
+            quiet,
+            &format!("computing similarity for {}...", note_path.as_str_lossy()),
+        );
+        let hits = service.note_similarity_for(&note_path)?;
+        progress(quiet, &format!("done: {} hits", hits.len()));
+
+        match fmt {
+            OutputFormat::Json => {
+                emit_json(&hits);
+            }
+            OutputFormat::Text => {
+                for hit in &hits {
+                    println!(
+                        "{:.3}\t{}\t{}",
+                        hit.score,
+                        hit.source.as_str_lossy(),
+                        hit.target.as_str_lossy()
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+async fn handle_graph(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    note: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
+    let snapshot = service.index_snapshot();
+    let graph = service.build_graph()?;
+
+    let (source, outgoing) = if let Some(note) = note {
+        let source = VaultPath::try_from(note.as_path())?;
+        let links = snapshot.resolved_outgoing_internal_links(&source);
+        (Some(source.as_str_lossy()), Some(links))
+    } else {
+        (None, None)
+    };
+
+    match fmt {
+        OutputFormat::Json => {
+            emit_json(&GraphOutput {
+                unresolved_internal_occurrences: graph.backlinks.unresolved,
+                ambiguous_internal_occurrences: graph.backlinks.ambiguous,
+                issue_count: graph.issues.len(),
+                source,
+                outgoing,
+            });
+        }
+        OutputFormat::Text => {
             println!("summary");
             println!(
                 "  unresolved_internal_occurrences: {}",
@@ -624,11 +1036,9 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
             );
             println!("  issue_count: {}", graph.issues.len());
 
-            if let Some(note) = note {
-                let source = VaultPath::try_from(note.as_path())?;
-                let outgoing = snapshot.resolved_outgoing_internal_links(&source);
-                println!("\nsource: {}", source.as_str_lossy());
-                for o in outgoing {
+            if let (Some(src), Some(links)) = (&source, &outgoing) {
+                println!("\nsource: {src}");
+                for o in links {
                     match &o.resolution {
                         oxidian::ResolveResult::Resolved(p) => {
                             println!(
@@ -662,192 +1072,64 @@ async fn handle_report(vault: Option<PathBuf>, command: ReportCommand) -> anyhow
                 }
             }
         }
-        ReportCommand::LinkHealth { show_broken } => {
-            let report = service.link_health_report()?;
-            println!("summary");
-            println!(
-                "  internal_occurrences: {}",
-                report.total_internal_occurrences
-            );
-            println!("  ok: {}", report.ok);
-            println!("  broken: {}", report.broken.len());
-
-            if show_broken {
-                println!("\nbroken:");
-                for issue in &report.broken {
-                    let where_ = format!(
-                        "{}:{}",
-                        issue.source.as_str_lossy(),
-                        issue.link.location.line
-                    );
-                    match &issue.reason {
-                        LinkIssueReason::MissingTarget => {
-                            println!("- {where_}\tmissing\t{:?}", issue.link.target);
-                        }
-                        LinkIssueReason::AmbiguousTarget { candidates } => {
-                            println!(
-                                "- {where_}\tambiguous\t{:?}\tcandidates={:?}",
-                                issue.link.target, candidates
-                            );
-                        }
-                        LinkIssueReason::MissingHeading { heading } => {
-                            println!(
-                                "- {where_}\tmissing_heading\t{:?}\t#{}",
-                                issue.link.target, heading
-                            );
-                        }
-                        LinkIssueReason::MissingBlock { block } => {
-                            println!(
-                                "- {where_}\tmissing_block\t{:?}\t^{}",
-                                issue.link.target, block
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        ReportCommand::Frontmatter {
-            show_missing,
-            show_broken,
-        } => {
-            let report = snapshot.frontmatter_report();
-            println!("summary");
-            println!("  notes_without_frontmatter: {}", report.none);
-            println!("  notes_with_frontmatter_valid: {}", report.valid);
-            println!("  notes_with_frontmatter_broken: {}", report.broken);
-
-            if show_missing {
-                println!("\nmissing:");
-                for p in snapshot.notes_without_frontmatter() {
-                    println!("- {}", p.as_str_lossy());
-                }
-            }
-
-            if show_broken {
-                println!("\nbroken:");
-                for (p, err) in snapshot.notes_with_broken_frontmatter() {
-                    println!("- {}\t{}", p.as_str_lossy(), err);
-                }
-            }
-        }
-        ReportCommand::Similarity { min_score, top_k } => {
-            if !similarity_enabled {
-                let _ = min_score;
-                let _ = top_k;
-                eprintln!("This command requires --features similarity");
-                return Ok(());
-            }
-
-            #[cfg(feature = "similarity")]
-            {
-                let mut cfg = VaultConfig::default();
-                if let Some(score) = min_score {
-                    cfg.similarity_min_score = score;
-                }
-                if let Some(top_k) = top_k {
-                    cfg.similarity_top_k = top_k;
-                }
-
-                let vault = Vault::with_config(&vault_path, cfg)?;
-                let service = VaultService::new(vault)?;
-                eprintln!("building index...");
-                service.build_index().await?;
-                eprintln!("index ready");
-
-                eprintln!("computing similarity report...");
-                let report = service.note_similarity_report()?;
-                eprintln!(
-                    "done: {} hits across {} notes",
-                    report.hits.len(),
-                    report.total_notes
-                );
-                println!("total_notes\t{}", report.total_notes);
-                println!("pairs_checked\t{}", report.pairs_checked);
-                for hit in report.hits {
-                    println!(
-                        "{:.3}\t{}\t{}",
-                        hit.score,
-                        hit.source.as_str_lossy(),
-                        hit.target.as_str_lossy()
-                    );
-                }
-            }
-        }
-        ReportCommand::Schema {
-            show_violations,
-            severity,
-            limit,
-        } => {
-            let report = service.schema_report();
-            println!("schema");
-            println!("  status: {:?}", report.status);
-            println!("  errors: {}", report.errors);
-            println!("  warnings: {}", report.warnings);
-            println!("  total_violations: {}", report.violations.len());
-
-            if show_violations {
-                let severity = severity.map(Into::into);
-                println!("\nviolations:");
-                for v in report
-                    .violations
-                    .iter()
-                    .filter(|v| severity.as_ref().is_none_or(|s| &v.violation.severity == s))
-                    .take(limit)
-                {
-                    let path = v
-                        .path
-                        .as_ref()
-                        .map(|p| p.as_str_lossy())
-                        .unwrap_or_else(|| "<vault>".into());
-                    println!(
-                        "- {}\t{:?}\t{}\t{}",
-                        path, v.violation.severity, v.violation.code, v.violation.message
-                    );
-                }
-            }
-        }
     }
 
     Ok(())
 }
 
-async fn handle_search(vault: Option<PathBuf>, command: SearchCommand) -> anyhow::Result<()> {
-    #[cfg(not(feature = "similarity"))]
-    if matches!(&command, SearchCommand::Semantic { .. }) {
-        eprintln!("This command requires --features similarity");
-        return Ok(());
-    }
-
-    let vault = Vault::open(require_vault(vault)?)?;
-    let service = VaultService::new(vault)?;
-    service.build_index().await?;
-
-    match command {
-        SearchCommand::Files { query, limit } => {
+async fn handle_search(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    quiet: bool,
+    query: String,
+    mode: SearchMode,
+    limit: usize,
+    min_score: Option<f32>,
+) -> anyhow::Result<()> {
+    match mode {
+        SearchMode::Files => {
+            let service = open_service(vault).await?;
             let hits = service.search_filenames_fuzzy(&query, limit);
-            for hit in hits {
-                println!("{}\t{}", hit.score, hit.path.as_str_lossy());
+            match fmt {
+                OutputFormat::Json => emit_json(&hits),
+                OutputFormat::Text => {
+                    for hit in &hits {
+                        println!("{}\t{}", hit.score, hit.path.as_str_lossy());
+                    }
+                }
             }
         }
-        SearchCommand::Content { query, limit } => {
+        SearchMode::Content => {
+            let service = open_service(vault).await?;
             let hits = service.search_content_fuzzy(&query, limit).await?;
-            for hit in hits {
-                println!(
-                    "{}\t{}:{}\t{}",
-                    hit.score,
-                    hit.path.as_str_lossy(),
-                    hit.line,
-                    hit.line_text.trim()
-                );
+            match fmt {
+                OutputFormat::Json => emit_json(&hits),
+                OutputFormat::Text => {
+                    for hit in &hits {
+                        println!(
+                            "{}\t{}:{}\t{}",
+                            hit.score,
+                            hit.path.as_str_lossy(),
+                            hit.line,
+                            hit.line_text.trim()
+                        );
+                    }
+                }
             }
         }
-        SearchCommand::Semantic {
-            query,
-            limit,
-            min_score,
-        } => {
+        SearchMode::Semantic => {
+            #[cfg(not(feature = "similarity"))]
+            {
+                let _ = (vault, fmt, quiet, query, limit, min_score);
+                anyhow::bail!("This command requires --features similarity");
+            }
+
             #[cfg(feature = "similarity")]
             {
+                progress(quiet, "building index...");
+                let service = open_service_with_similarity(vault, min_score, None).await?;
+                progress(quiet, "index ready");
+
                 let hits = if let Some(score) = min_score {
                     service
                         .search_content_semantic_with_min_score(&query, limit, score)
@@ -855,16 +1137,14 @@ async fn handle_search(vault: Option<PathBuf>, command: SearchCommand) -> anyhow
                 } else {
                     service.search_content_semantic(&query, limit).await?
                 };
-                for hit in hits {
-                    println!("{:.3}\t{}", hit.score, hit.path.as_str_lossy());
+                match fmt {
+                    OutputFormat::Json => emit_json(&hits),
+                    OutputFormat::Text => {
+                        for hit in &hits {
+                            println!("{:.3}\t{}", hit.score, hit.path.as_str_lossy());
+                        }
+                    }
                 }
-            }
-
-            #[cfg(not(feature = "similarity"))]
-            {
-                let _ = query;
-                let _ = limit;
-                let _ = min_score;
             }
         }
     }
@@ -872,35 +1152,46 @@ async fn handle_search(vault: Option<PathBuf>, command: SearchCommand) -> anyhow
     Ok(())
 }
 
-async fn handle_query(vault: Option<PathBuf>, command: QueryCommand) -> anyhow::Result<()> {
-    let vault = Vault::open(require_vault(vault)?)?;
-    let service = VaultService::new(vault)?;
-    service.build_index().await?;
+#[allow(clippy::too_many_arguments)]
+async fn handle_query(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    prefix: Option<String>,
+    tag: Option<String>,
+    exists: Vec<String>,
+    eq: Vec<String>,
+    contains: Vec<String>,
+    gt: Vec<String>,
+    sort: Option<String>,
+    desc: bool,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let service = open_service(vault).await?;
 
     let mut q = Query::notes();
-    if let Some(prefix) = command.prefix {
+    if let Some(prefix) = prefix {
         q = q.from_path_prefix(prefix);
     }
-    if let Some(tag) = command.tag {
+    if let Some(tag) = tag {
         q = q.from_tag(tag);
     }
 
-    for key in command.exists {
+    for key in exists {
         q = q.where_field(key).exists();
     }
-    for kv in command.eq {
+    for kv in eq {
         let Some((k, v)) = kv.split_once('=') else {
             continue;
         };
         q = q.where_field(k).eq(v);
     }
-    for kv in command.contains {
+    for kv in contains {
         let Some((k, v)) = kv.split_once('=') else {
             continue;
         };
         q = q.where_field(k).contains(v);
     }
-    for kv in command.gt {
+    for kv in gt {
         let Some((k, v)) = kv.split_once('=') else {
             continue;
         };
@@ -909,188 +1200,371 @@ async fn handle_query(vault: Option<PathBuf>, command: QueryCommand) -> anyhow::
         }
     }
 
-    let dir = if command.desc {
-        SortDir::Desc
-    } else {
-        SortDir::Asc
-    };
-    if let Some(field) = command.sort_field {
+    let dir = if desc { SortDir::Desc } else { SortDir::Asc };
+    if let Some(field) = sort {
         q = q.sort_by_field(field, dir);
     } else {
         q = q.sort_by_path(dir);
     }
-    q = q.limit(command.limit);
+    q = q.limit(limit);
 
-    for hit in service.query(&q) {
-        println!("{}", hit.path.as_str_lossy());
-    }
+    let hits: Vec<oxidian::QueryHit> = service.query(&q);
 
-    Ok(())
-}
-
-async fn handle_watch(vault: Option<PathBuf>, command: WatchCommand) -> anyhow::Result<()> {
-    match command {
-        WatchCommand::Index => {
-            let vault = Vault::open(require_vault(vault)?)?;
-            let mut service = VaultService::new(vault)?;
-            service.build_index().await?;
-            let mut rx = service.subscribe();
-
-            service.start_watching().await?;
-            println!("watching... (Ctrl-C to stop)");
-
-            loop {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => break,
-                    ev = rx.recv() => {
-                        match ev {
-                            Ok(ev) => println!("{ev:?}"),
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                eprintln!("(lagged {n} events)");
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
+    match fmt {
+        OutputFormat::Json => emit_json(&hits),
+        OutputFormat::Text => {
+            for hit in &hits {
+                println!("{}", hit.path.as_str_lossy());
             }
-
-            service.shutdown().await;
         }
     }
 
     Ok(())
 }
 
-async fn handle_sqlite(vault: Option<PathBuf>, command: SqliteCommand) -> anyhow::Result<()> {
+async fn handle_check(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    quiet: bool,
+    command: CheckCommand,
+) -> anyhow::Result<()> {
+    match command {
+        CheckCommand::Links { limit } => {
+            let service = open_service(vault).await?;
+            let report = service.link_health_report()?;
+
+            let broken: Vec<oxidian::LinkIssue> = report.broken.into_iter().take(limit).collect();
+
+            match fmt {
+                OutputFormat::Json => {
+                    emit_json(&LinkHealthOutput {
+                        internal_occurrences: report.total_internal_occurrences,
+                        ok: report.ok,
+                        broken_count: broken.len(),
+                        broken,
+                    });
+                }
+                OutputFormat::Text => {
+                    println!("summary");
+                    println!(
+                        "  internal_occurrences: {}",
+                        report.total_internal_occurrences
+                    );
+                    println!("  ok: {}", report.ok);
+                    println!("  broken: {}", broken.len());
+
+                    if !broken.is_empty() {
+                        println!("\nbroken:");
+                        for issue in &broken {
+                            let where_ = format!(
+                                "{}:{}",
+                                issue.source.as_str_lossy(),
+                                issue.link.location.line
+                            );
+                            match &issue.reason {
+                                LinkIssueReason::MissingTarget => {
+                                    println!("- {where_}\tmissing\t{:?}", issue.link.target);
+                                }
+                                LinkIssueReason::AmbiguousTarget { candidates } => {
+                                    println!(
+                                        "- {where_}\tambiguous\t{:?}\tcandidates={:?}",
+                                        issue.link.target, candidates
+                                    );
+                                }
+                                LinkIssueReason::MissingHeading { heading } => {
+                                    println!(
+                                        "- {where_}\tmissing_heading\t{:?}\t#{}",
+                                        issue.link.target, heading
+                                    );
+                                }
+                                LinkIssueReason::MissingBlock { block } => {
+                                    println!(
+                                        "- {where_}\tmissing_block\t{:?}\t^{}",
+                                        issue.link.target, block
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        CheckCommand::Frontmatter { limit } => {
+            let service = open_service(vault).await?;
+            let snapshot = service.index_snapshot();
+            let report = snapshot.frontmatter_report();
+
+            let missing: Vec<String> = snapshot
+                .notes_without_frontmatter()
+                .take(limit)
+                .map(|p| p.as_str_lossy())
+                .collect();
+
+            let broken: Vec<FrontmatterBroken> = snapshot
+                .notes_with_broken_frontmatter()
+                .take(limit)
+                .map(|(p, err)| FrontmatterBroken {
+                    path: p.as_str_lossy(),
+                    error: err.to_string(),
+                })
+                .collect();
+
+            match fmt {
+                OutputFormat::Json => {
+                    emit_json(&FrontmatterOutput {
+                        notes_without_frontmatter: report.none,
+                        notes_with_frontmatter_valid: report.valid,
+                        notes_with_frontmatter_broken: report.broken,
+                        missing,
+                        broken,
+                    });
+                }
+                OutputFormat::Text => {
+                    println!("summary");
+                    println!("  notes_without_frontmatter: {}", report.none);
+                    println!("  notes_with_frontmatter_valid: {}", report.valid);
+                    println!("  notes_with_frontmatter_broken: {}", report.broken);
+
+                    if !missing.is_empty() {
+                        println!("\nmissing:");
+                        for p in &missing {
+                            println!("- {p}");
+                        }
+                    }
+
+                    if !broken.is_empty() {
+                        println!("\nbroken:");
+                        for b in &broken {
+                            println!("- {}\t{}", b.path, b.error);
+                        }
+                    }
+                }
+            }
+        }
+        CheckCommand::Schema { severity, limit } => {
+            let service = open_service(vault).await?;
+            let report = service.schema_report();
+
+            let severity_filter = severity.map(Into::into);
+            let violations: Vec<oxidian::SchemaViolationRecord> = report
+                .violations
+                .into_iter()
+                .filter(|v| {
+                    severity_filter
+                        .as_ref()
+                        .is_none_or(|s| &v.violation.severity == s)
+                })
+                .take(limit)
+                .collect();
+
+            match fmt {
+                OutputFormat::Json => {
+                    emit_json(&SchemaCheckOutput {
+                        status: report.status,
+                        errors: report.errors,
+                        warnings: report.warnings,
+                        total_violations: violations.len(),
+                        violations,
+                    });
+                }
+                OutputFormat::Text => {
+                    println!("schema");
+                    println!("  status: {:?}", report.status);
+                    println!("  errors: {}", report.errors);
+                    println!("  warnings: {}", report.warnings);
+                    println!("  total_violations: {}", violations.len());
+
+                    if !violations.is_empty() {
+                        println!("\nviolations:");
+                        for v in &violations {
+                            let path = v
+                                .path
+                                .as_ref()
+                                .map(|p| p.as_str_lossy())
+                                .unwrap_or_else(|| "<vault>".into());
+                            println!(
+                                "- {}\t{:?}\t{}\t{}",
+                                path, v.violation.severity, v.violation.code, v.violation.message
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        CheckCommand::Similarity { min_score, top_k } => {
+            #[cfg(not(feature = "similarity"))]
+            {
+                let _ = (vault, fmt, quiet, min_score, top_k);
+                anyhow::bail!("This command requires --features similarity");
+            }
+
+            #[cfg(feature = "similarity")]
+            {
+                progress(quiet, "building index...");
+                let service = open_service_with_similarity(vault, min_score, top_k).await?;
+                progress(quiet, "index ready");
+
+                progress(quiet, "computing similarity report...");
+                let report = service.note_similarity_report()?;
+                progress(
+                    quiet,
+                    &format!(
+                        "done: {} hits across {} notes",
+                        report.hits.len(),
+                        report.total_notes
+                    ),
+                );
+
+                match fmt {
+                    OutputFormat::Json => emit_json(&report),
+                    OutputFormat::Text => {
+                        println!("total_notes\t{}", report.total_notes);
+                        println!("pairs_checked\t{}", report.pairs_checked);
+                        for hit in &report.hits {
+                            println!(
+                                "{:.3}\t{}\t{}",
+                                hit.score,
+                                hit.source.as_str_lossy(),
+                                hit.target.as_str_lossy()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_watch(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let vault = Vault::open(require_vault(vault)?)?;
+    let mut service = VaultService::new(vault)?;
+    service.build_index().await?;
+    let mut rx = service.subscribe();
+
+    service.start_watching().await?;
+    progress(quiet, "watching... (Ctrl-C to stop)");
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            ev = rx.recv() => {
+                match ev {
+                    Ok(ev) => match fmt {
+                        OutputFormat::Json => {
+                            println!("{}", serde_json::to_string(&ev).expect("json serialization"));
+                        }
+                        OutputFormat::Text => println!("{ev:?}"),
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        progress(quiet, &format!("(lagged {n} events)"));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    service.shutdown().await;
+    Ok(())
+}
+
+async fn handle_persist(
+    vault: Option<PathBuf>,
+    fmt: OutputFormat,
+    quiet: bool,
+    db: Option<PathBuf>,
+) -> anyhow::Result<()> {
     #[cfg(not(feature = "sqlite"))]
     {
-        let _ = vault;
-        let _ = command;
-        eprintln!("This command requires --features sqlite");
-        Ok(())
+        let _ = (vault, fmt, quiet, db);
+        anyhow::bail!("This command requires --features sqlite");
     }
 
     #[cfg(feature = "sqlite")]
     {
         use oxidian::{SqliteIndexStore, VaultEvent};
 
-        match command {
-            SqliteCommand::Persist { db } => {
-                let vault = Vault::open(require_vault(vault)?)?;
-                let mut service = VaultService::new(vault)?;
-                service.build_index().await?;
+        let vault = Vault::open(require_vault(vault)?)?;
+        let mut service = VaultService::new(vault)?;
+        service.build_index().await?;
 
-                let mut store = match db {
-                    Some(p) => SqliteIndexStore::open_path(p)?,
-                    None => SqliteIndexStore::open_default(service.vault())?,
-                };
-                store.write_full_index(service.vault(), &service.index_snapshot())?;
-                let (files, notes, tags, tasks, links) = store.counts()?;
+        let mut store = match db {
+            Some(p) => SqliteIndexStore::open_path(p)?,
+            None => SqliteIndexStore::open_default(service.vault())?,
+        };
+        store.write_full_index(service.vault(), &service.index_snapshot())?;
+        let (files, notes, tags, tasks, links) = store.counts()?;
+
+        match fmt {
+            OutputFormat::Json => {
+                emit_json(&PersistOutput {
+                    files,
+                    notes,
+                    tags,
+                    tasks,
+                    links,
+                });
+            }
+            OutputFormat::Text => {
                 println!(
                     "persisted: files={files} notes={notes} tags={tags} tasks={tasks} links={links}"
                 );
+            }
+        }
 
-                let mut rx = service.subscribe();
-                service.start_watching().await?;
-                println!("watching... (Ctrl-C to stop)");
+        let mut rx = service.subscribe();
+        service.start_watching().await?;
+        progress(quiet, "watching... (Ctrl-C to stop)");
 
-                loop {
-                    tokio::select! {
-                        _ = tokio::signal::ctrl_c() => break,
-                        ev = rx.recv() => {
-                            let Ok(ev) = ev else { continue; };
-                            match ev {
-                                VaultEvent::Indexed { path, .. } => {
-                                    let snap = service.index_snapshot();
-                                    store.upsert_path(service.vault(), &snap, &path)?;
-                                }
-                                VaultEvent::Removed { path, .. } => {
-                                    store.remove_path(&path)?;
-                                }
-                                VaultEvent::Renamed { from, to, .. } => {
-                                    store.remove_path(&from)?;
-                                    let snap = service.index_snapshot();
-                                    store.upsert_path(service.vault(), &snap, &to)?;
-                                }
-                                VaultEvent::Error { .. } => {}
-                            }
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break,
+                ev = rx.recv() => {
+                    let Ok(ev) = ev else { continue; };
+                    match ev {
+                        VaultEvent::Indexed { path, .. } => {
+                            let snap = service.index_snapshot();
+                            store.upsert_path(service.vault(), &snap, &path)?;
                         }
+                        VaultEvent::Removed { path, .. } => {
+                            store.remove_path(&path)?;
+                        }
+                        VaultEvent::Renamed { from, to, .. } => {
+                            store.remove_path(&from)?;
+                            let snap = service.index_snapshot();
+                            store.upsert_path(service.vault(), &snap, &to)?;
+                        }
+                        VaultEvent::Error { .. } => {}
                     }
                 }
-
-                service.shutdown().await;
             }
         }
 
+        service.shutdown().await;
         Ok(())
     }
 }
 
-async fn handle_similarity(
+async fn handle_schema(
     vault: Option<PathBuf>,
-    command: SimilarityCommand,
+    fmt: OutputFormat,
+    command: SchemaCommand,
 ) -> anyhow::Result<()> {
-    #[cfg(not(feature = "similarity"))]
-    {
-        let _ = vault;
-        let _ = command;
-        eprintln!("This command requires --features similarity");
-        Ok(())
-    }
-
-    #[cfg(feature = "similarity")]
-    {
-        let mut cfg = VaultConfig::default();
-        let (min_score, top_k) = match &command {
-            SimilarityCommand::Neighbors {
-                min_score, top_k, ..
-            } => (*min_score, *top_k),
-        };
-        if let Some(score) = min_score {
-            cfg.similarity_min_score = score;
-        }
-        if let Some(top_k) = top_k {
-            cfg.similarity_top_k = top_k;
-        }
-
-        let vault = Vault::with_config(require_vault(vault)?, cfg)?;
-        let service = VaultService::new(vault)?;
-        eprintln!("building index...");
-        service.build_index().await?;
-        eprintln!("index ready");
-
-        match command {
-            SimilarityCommand::Neighbors { note, .. } => {
-                let note_path = VaultPath::try_from(note.as_path())?;
-                eprintln!("computing similarity for {}...", note_path.as_str_lossy());
-                let hits = service.note_similarity_for(&note_path)?;
-                eprintln!("done: {} hits", hits.len());
-                for hit in hits {
-                    println!(
-                        "{:.3}\t{}\t{}",
-                        hit.score,
-                        hit.source.as_str_lossy(),
-                        hit.target.as_str_lossy()
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-async fn handle_schema(vault: Option<PathBuf>, command: SchemaCommand) -> anyhow::Result<()> {
     match command {
         SchemaCommand::Init { template, force } => {
             let vault = require_vault(vault)?;
             let schema_path = vault.join(".obsidian/oxidian/schema.toml");
             if schema_path.exists() && !force {
-                eprintln!(
+                anyhow::bail!(
                     "schema already exists at {}; use --force to overwrite",
                     schema_path.display()
                 );
-                anyhow::bail!("schema already exists");
             }
 
             if let Some(parent) = schema_path.parent() {
@@ -1101,11 +1575,23 @@ async fn handle_schema(vault: Option<PathBuf>, command: SchemaCommand) -> anyhow
             let contents = toml::to_string_pretty(&schema)
                 .map_err(|err| anyhow::anyhow!("failed to serialize schema: {err}"))?;
             fs::write(&schema_path, contents)?;
-            println!(
-                "schema written to {} (template: {:?})",
-                schema_path.display(),
-                template
-            );
+
+            let template_name = format!("{template:?}");
+            match fmt {
+                OutputFormat::Json => {
+                    emit_json(&SchemaInitOutput {
+                        path: schema_path.display().to_string(),
+                        template: template_name,
+                    });
+                }
+                OutputFormat::Text => {
+                    println!(
+                        "schema written to {} (template: {})",
+                        schema_path.display(),
+                        template_name
+                    );
+                }
+            }
         }
     }
 
@@ -1134,29 +1620,9 @@ fn init_web_ui_logging() {
     });
 }
 
-fn normalize_tag_for_query(raw: &str) -> anyhow::Result<String> {
-    let s = raw.trim();
-    if s.is_empty() {
-        anyhow::bail!("tag is empty");
-    }
-    let s = s.strip_prefix('#').unwrap_or(s);
-    let s = s.trim_matches('/').trim();
-    if s.is_empty() {
-        anyhow::bail!("tag is empty");
-    }
-    Ok(s.to_lowercase())
-}
-
-fn require_vault(vault: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    vault.ok_or_else(|| anyhow::anyhow!("--vault is required (or set OBSIDIAN_VAULT)"))
-}
-
-fn print_occ(l: &Link) {
-    println!(
-        "- {:?}\tembed={}\t{}:{}\ttarget={:?}\tsubpath={:?}\tdisplay={:?}\traw={:?}",
-        l.kind, l.embed, l.location.line, l.location.column, l.target, l.subpath, l.display, l.raw
-    );
-}
+// ---------------------------------------------------------------------------
+// Schema templates
+// ---------------------------------------------------------------------------
 
 fn generate_schema_template(template: SchemaTemplate) -> Schema {
     match template {
@@ -1814,19 +2280,16 @@ fn insert_node_type(node: &mut NodeSchema, key: &str, doc: &str) {
         .or_insert_with(|| doc.to_string());
 }
 
-fn map_str<const N: usize>(items: [(&str, &str); N]) -> std::collections::BTreeMap<String, String> {
-    let mut out = std::collections::BTreeMap::new();
+fn map_str<const N: usize>(items: [(&str, &str); N]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
     for (k, v) in items {
         out.insert(k.to_string(), v.to_string());
     }
     out
 }
 
-fn map_defs<const N: usize>(
-    items: [(&str, PredicateDef); N],
-) -> std::collections::BTreeMap<String, PredicateDef> {
-    let mut out: std::collections::BTreeMap<String, PredicateDef> =
-        std::collections::BTreeMap::new();
+fn map_defs<const N: usize>(items: [(&str, PredicateDef); N]) -> BTreeMap<String, PredicateDef> {
+    let mut out: BTreeMap<String, PredicateDef> = BTreeMap::new();
     for (k, v) in items {
         out.insert(k.to_string(), v);
     }

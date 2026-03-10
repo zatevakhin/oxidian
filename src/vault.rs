@@ -5,6 +5,15 @@ use crate::{Error, Result, VaultConfig};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VaultPath(PathBuf);
 
+impl serde::Serialize for VaultPath {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_str_lossy())
+    }
+}
+
 impl VaultPath {
     pub fn as_path(&self) -> &Path {
         &self.0

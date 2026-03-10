@@ -9,7 +9,8 @@ use crate::{
     Error, IndexDelta, Result, Schema, SchemaSource, SchemaStatus, Vault, VaultIndex, VaultPath,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WatchKind {
     Create,
     Modify,
@@ -21,7 +22,8 @@ pub enum WatchKind {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReindexCause {
     /// The user (or host application) explicitly requested an index rebuild.
     Manual,
@@ -31,7 +33,8 @@ pub enum ReindexCause {
     Watch { kind: WatchKind, event_kind: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VaultEvent {
     Indexed {
         path: VaultPath,

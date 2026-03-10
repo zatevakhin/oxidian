@@ -1,13 +1,13 @@
 use crate::{Backlink, BacklinksIndex, Link, LinkTarget, ResolveResult, VaultIndex, VaultPath};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResolvedInternalLink {
     pub source: VaultPath,
     pub link: Link,
     pub resolution: ResolveResult,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct GraphIndex {
     pub backlinks: BacklinksIndex,
     pub issues: Vec<ResolvedInternalLink>,

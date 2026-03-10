@@ -19,7 +19,8 @@ pub struct LinkResolver {
     inner: Resolver,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolveResult {
     Resolved(VaultPath),
     Ambiguous(Vec<VaultPath>),

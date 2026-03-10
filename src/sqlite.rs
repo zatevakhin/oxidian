@@ -7,8 +7,9 @@ use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::{Connection, OptionalExtension, params};
 #[cfg(feature = "similarity")]
 use sqlite_vec::sqlite3_vec_init;
+use tracing::debug;
 #[cfg(feature = "similarity")]
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 #[cfg(feature = "similarity")]
 use zerocopy::AsBytes;
 

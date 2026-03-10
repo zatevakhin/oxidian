@@ -9,15 +9,6 @@
     inputs.flake-parts.lib.mkFlake {inherit inputs;} {
       systems = inputs.nixpkgs.lib.systems.flakeExposed;
 
-      flake = let
-        searxngMcpModule = import ./nix/nixos-module/searxng-mcp.nix;
-      in {
-        nixosModules = {
-          searxng-mcp = searxngMcpModule;
-          default = searxngMcpModule;
-        };
-      };
-
       perSystem = {
         system,
         self',
@@ -36,7 +27,29 @@
           rustc = rustToolchain;
         };
 
-        searxngMcp = rustPlatform.buildRustPackage {
+        # Pre-build the web UI so the Rust build doesn't need network access
+        oxiUi = pkgs.buildNpmPackage {
+          pname = "oxidian-ui";
+          version = cargoToml.package.version;
+          src = ./ui;
+          npmDepsHash = "sha256-7O+9gPyR63asqBqsBRc5R1flYNZ28xfqKhaAJ9aM458=";
+          npmFlags = ["--legacy-peer-deps"];
+          # Skip tsc type-checking (sigma v2/v3 peer dep mismatch causes type
+          # errors that don't affect the runtime bundle). Just run vite build.
+          buildPhase = ''
+            runHook preBuild
+            npx vite build
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/dist
+            cp -R dist/. $out/dist/
+            runHook postInstall
+          '';
+        };
+
+        oxi = rustPlatform.buildRustPackage {
           pname = cargoToml.package.name;
           version = cargoToml.package.version;
           src = pkgs.lib.cleanSource ./.;
@@ -45,25 +58,29 @@
             lockFile = ./Cargo.lock;
           };
 
+          buildFeatures = ["web-ui"];
+          OXI_UI_DIST = "${oxiUi}/dist";
+
           meta = {
-            mainProgram = "searxng-mcp";
+            mainProgram = "oxi";
+            description = "Obsidian vault indexing + query CLI";
           };
         };
       in {
-        packages.searxng-mcp = searxngMcp;
-        packages.default = searxngMcp;
+        packages.oxi = oxi;
+        packages.default = oxi;
 
-        apps.searxng-mcp = {
+        apps.oxi = {
           type = "app";
-          program = "${self'.packages.searxng-mcp}/bin/searxng-mcp";
+          program = "${self'.packages.oxi}/bin/oxi";
         };
-        apps.default = self'.apps.searxng-mcp;
+        apps.default = self'.apps.oxi;
 
         devShells.default = pkgs.mkShell {
-          buildInputs = [rustToolchain pkgs.cacert pkgs.sqlite];
+          buildInputs = [rustToolchain pkgs.cacert pkgs.sqlite pkgs.nodejs];
 
           shellHook = ''
-            export PS1="(env:searxng-mcp) $PS1"
+            export PS1="(oxidian) $PS1"
           '';
         };
       };

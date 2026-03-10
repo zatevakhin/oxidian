@@ -1,7 +1,11 @@
 [package]
 name = "oxidian"
-version = "0.1.12"
+version = "0.2.0"
 edition = "2024"
+
+[[bin]]
+name = "oxi"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -24,7 +28,7 @@ walkdir = "2.5"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 
 rusqlite = { version = "0.37", optional = true }
-serde_json = { version = "1", optional = true }
+serde_json = "1"
 sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 lru = { version = "0.12", optional = true }
@@ -35,7 +39,7 @@ ureq = { version = "2.10", optional = true }
 zerocopy = { version = "0.7", optional = true }
 
 [features]
-sqlite = ["dep:rusqlite", "dep:serde_json"]
+sqlite = ["dep:rusqlite"]
 similarity = [
     "sqlite",
     "dep:sha2",
@@ -47,7 +51,9 @@ similarity = [
     "dep:ureq",
     "dep:zerocopy",
 ]
-web-ui = ["dep:axum", "dep:serde_json", "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess", "dep:tower-http"]
+web-ui = ["dep:axum", "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess", "dep:tower-http"]
 
 [dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
 tempfile = "3"

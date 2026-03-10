@@ -1,6 +1,7 @@
 use crate::{FieldValue, Tag, TaskStatus, VaultIndex, VaultPath, fields::normalize_field_key};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CmpOp {
     Gt,
     Gte,
@@ -8,19 +9,21 @@ pub enum CmpOp {
     Lte,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SortDir {
     Asc,
     Desc,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SortKey {
     Path,
     Field(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Sort {
     pub key: SortKey,
     pub dir: SortDir,
@@ -43,12 +46,12 @@ pub struct Query {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct QueryHit {
     pub path: VaultPath,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskHit {
     pub path: VaultPath,
     pub line: u32,

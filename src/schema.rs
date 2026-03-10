@@ -14,13 +14,15 @@ pub enum SchemaSeverity {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SchemaSource {
     File(PathBuf),
     Inline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SchemaStatus {
     #[default]
     Disabled,
@@ -34,7 +36,7 @@ pub enum SchemaStatus {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SchemaViolation {
     pub severity: SchemaSeverity,
     pub code: String,
@@ -43,13 +45,13 @@ pub struct SchemaViolation {
     pub rule_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SchemaViolationRecord {
     pub path: Option<VaultPath>,
     pub violation: SchemaViolation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SchemaReport {
     pub status: SchemaStatus,
     pub errors: usize,

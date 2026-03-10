@@ -6,20 +6,20 @@ use crate::embeddings::{EmbeddingModel, clean_markdown_for_embedding};
 use crate::sqlite::SqliteIndexStore;
 use crate::{Error, Result, Vault, VaultIndex, VaultPath};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SemanticSearchHit {
     pub path: VaultPath,
     pub score: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NoteSimilarityHit {
     pub source: VaultPath,
     pub target: VaultPath,
     pub score: f32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct NoteSimilarityReport {
     pub total_notes: usize,
     pub pairs_checked: usize,
