@@ -31,8 +31,8 @@ pub use crate::index::{
 };
 pub use crate::link_resolve::{LinkResolver, ResolveResult};
 pub use crate::links::{
-    Backlink, BacklinksIndex, Link, LinkHealthReport, LinkIssue, LinkIssueReason, LinkKind,
-    LinkLocation, LinkTarget, Subpath,
+    Backlink, BacklinksIndex, Link, LinkHealthReport, LinkIssue, LinkIssueKind, LinkIssueReason,
+    LinkKind, LinkLocation, LinkTarget, Subpath,
 };
 pub use crate::mentions::UnlinkedMention;
 pub use crate::query::{CmpOp, Query, QueryHit, SortDir, SortKey, TaskHit, TaskQuery};

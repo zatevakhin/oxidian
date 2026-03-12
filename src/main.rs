@@ -8,10 +8,10 @@ use std::sync::Once;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxidian::{
-    FileKind, LayoutRule, Link, LinkIssueReason, LinkKind, NodeSchema, NodeTypeSchema,
-    PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity, ScopeResolution, SortDir, Tag,
-    TaskQuery, TaskStatus, UnmatchedBehavior, Vault, VaultPath, VaultSchema, VaultScope,
-    VaultService,
+    FileKind, LayoutRule, Link, LinkIssueKind, LinkIssueReason, LinkKind, NodeSchema,
+    NodeTypeSchema, PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity, ScopeResolution,
+    SortDir, Tag, TaskQuery, TaskStatus, UnmatchedBehavior, Vault, VaultPath, VaultSchema,
+    VaultScope, VaultService,
 };
 
 #[cfg(feature = "similarity")]
@@ -360,6 +360,14 @@ enum CheckCommand {
         /// Maximum number of issues to print.
         #[arg(long, default_value_t = 100)]
         limit: usize,
+
+        /// Only include issues with these reasons (repeatable).
+        #[arg(long, conflicts_with = "exclude_reason")]
+        reason: Vec<LinkIssueKind>,
+
+        /// Exclude issues with these reasons (repeatable).
+        #[arg(long, conflicts_with = "reason")]
+        exclude_reason: Vec<LinkIssueKind>,
     },
     /// Audit frontmatter across the vault.
     Frontmatter {
@@ -1229,11 +1237,29 @@ async fn handle_check(
     command: CheckCommand,
 ) -> anyhow::Result<()> {
     match command {
-        CheckCommand::Links { limit } => {
+        CheckCommand::Links {
+            limit,
+            reason,
+            exclude_reason,
+        } => {
             let service = open_service(vault).await?;
             let report = service.link_health_report()?;
 
-            let broken: Vec<oxidian::LinkIssue> = report.broken.into_iter().take(limit).collect();
+            let broken: Vec<oxidian::LinkIssue> = report
+                .broken
+                .into_iter()
+                .filter(|issue| {
+                    let kind = issue.reason.kind();
+                    if !reason.is_empty() {
+                        reason.contains(&kind)
+                    } else if !exclude_reason.is_empty() {
+                        !exclude_reason.contains(&kind)
+                    } else {
+                        true
+                    }
+                })
+                .take(limit)
+                .collect();
 
             match fmt {
                 OutputFormat::Json => {

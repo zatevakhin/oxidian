@@ -48,6 +48,28 @@ pub enum LinkIssueReason {
     MissingBlock { block: String },
 }
 
+impl LinkIssueReason {
+    /// Return the discriminant as a simple, data-free enum.
+    pub fn kind(&self) -> LinkIssueKind {
+        match self {
+            Self::MissingTarget => LinkIssueKind::MissingTarget,
+            Self::AmbiguousTarget { .. } => LinkIssueKind::AmbiguousTarget,
+            Self::MissingHeading { .. } => LinkIssueKind::MissingHeading,
+            Self::MissingBlock { .. } => LinkIssueKind::MissingBlock,
+        }
+    }
+}
+
+/// Data-free discriminant of [`LinkIssueReason`], usable as a CLI filter value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum LinkIssueKind {
+    MissingTarget,
+    AmbiguousTarget,
+    MissingHeading,
+    MissingBlock,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LinkIssue {
     pub source: crate::VaultPath,

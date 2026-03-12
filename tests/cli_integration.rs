@@ -786,3 +786,201 @@ fn search_takes_positional_query_arg() {
         .assert()
         .success();
 }
+
+// ---------------------------------------------------------------------------
+// check links --reason / --exclude-reason filters
+// ---------------------------------------------------------------------------
+
+/// Helper: create a vault with all four kinds of broken links.
+fn create_link_issues_vault(root: &Path) {
+    fs::create_dir_all(root.join("a")).unwrap();
+    fs::create_dir_all(root.join("b")).unwrap();
+
+    // Target note with a heading and a block
+    fs::write(
+        root.join("Target.md"),
+        "# Real Heading\n\nParagraph ^blk1\n",
+    )
+    .unwrap();
+
+    // Duplicate notes for ambiguous resolution
+    fs::write(root.join("a/dup.md"), "# A dup\n").unwrap();
+    fs::write(root.join("b/dup.md"), "# B dup\n").unwrap();
+
+    // Source that produces all four issue types
+    fs::write(
+        root.join("source.md"),
+        "Links:\n\
+         [[NoSuchNote]]\n\
+         [[dup]]\n\
+         [[Target#Missing Heading]]\n\
+         [[Target^nope]]\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn check_links_exclude_reason_filters_out_missing_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    create_link_issues_vault(&vault);
+
+    let output = cmd()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "-o",
+            "json",
+            "check",
+            "links",
+            "--exclude-reason",
+            "missing-target",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let broken = json["data"]["broken"].as_array().unwrap();
+
+    // No missing_target issues should be present
+    for issue in broken {
+        assert!(
+            issue["reason"].as_str() != Some("missing_target"),
+            "missing_target should have been excluded but found: {issue}"
+        );
+        // For tagged variants, check the key
+        assert!(
+            issue["reason"].get("missing_target").is_none(),
+            "missing_target should have been excluded"
+        );
+    }
+
+    // Should still have the other three issue types
+    assert!(
+        !broken.is_empty(),
+        "expected non-missing_target issues to remain"
+    );
+}
+
+#[test]
+fn check_links_reason_includes_only_specified() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    create_link_issues_vault(&vault);
+
+    let output = cmd()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "-o",
+            "json",
+            "check",
+            "links",
+            "--reason",
+            "missing-heading",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let broken = json["data"]["broken"].as_array().unwrap();
+
+    assert_eq!(broken.len(), 1, "expected exactly 1 missing_heading issue");
+    // The reason for a tagged variant is an object with key "missing_heading"
+    assert!(
+        broken[0]["reason"].get("missing_heading").is_some(),
+        "expected missing_heading reason"
+    );
+}
+
+#[test]
+fn check_links_reason_and_exclude_reason_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    create_link_issues_vault(&vault);
+
+    // Both flags together should be a clap error
+    cmd()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "-o",
+            "json",
+            "check",
+            "links",
+            "--reason",
+            "missing-target",
+            "--exclude-reason",
+            "ambiguous-target",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn check_links_exclude_reason_interacts_with_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    create_link_issues_vault(&vault);
+
+    // Exclude missing_target, then limit to 1
+    let output = cmd()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "-o",
+            "json",
+            "check",
+            "links",
+            "--exclude-reason",
+            "missing-target",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let broken = json["data"]["broken"].as_array().unwrap();
+    assert_eq!(broken.len(), 1, "limit should cap filtered results to 1");
+}
+
+#[test]
+fn check_links_multiple_exclude_reasons() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    create_link_issues_vault(&vault);
+
+    // Exclude both missing_target and ambiguous_target
+    let output = cmd()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "-o",
+            "json",
+            "check",
+            "links",
+            "--exclude-reason",
+            "missing-target",
+            "--exclude-reason",
+            "ambiguous-target",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let broken = json["data"]["broken"].as_array().unwrap();
+
+    for issue in broken {
+        // Neither missing_target nor ambiguous_target should be present
+        assert!(issue["reason"].as_str() != Some("missing_target"));
+        assert!(issue["reason"].get("missing_target").is_none());
+        assert!(issue["reason"].get("ambiguous_target").is_none());
+    }
+    // Should have missing_heading and missing_block remaining
+    assert_eq!(broken.len(), 2, "expected 2 remaining issues");
+}
