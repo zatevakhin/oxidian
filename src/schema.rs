@@ -43,6 +43,26 @@ pub struct SchemaViolation {
     pub message: String,
     pub scope_id: Option<String>,
     pub rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<SchemaViolationDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SchemaViolationDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub got: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -322,6 +342,7 @@ impl Schema {
                     message: format!("path '{rel_str}' is outside configured scopes"),
                     scope_id: None,
                     rule_id: None,
+                    detail: None,
                 });
             }
             return out;
@@ -351,6 +372,7 @@ impl Schema {
                     message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
                     scope_id,
                     rule_id: None,
+                    detail: None,
                 });
             }
             return out;
@@ -364,6 +386,7 @@ impl Schema {
                     message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
                     scope_id,
                     rule_id: None,
+                    detail: None,
                 });
             }
             return out;
@@ -371,17 +394,44 @@ impl Schema {
 
         let allow_rules = selection.collect_allow();
         if !allow_rules.is_empty() {
-            let allowed = allow_rules
-                .iter()
-                .any(|rule| rule_matches(rule, &rel_within));
+            let mut template_mismatch = None;
+            let mut allowed = false;
+
+            for rule in &allow_rules {
+                match rule_match(rule, &rel_within) {
+                    RuleMatch::Matched => {
+                        allowed = true;
+                        break;
+                    }
+                    RuleMatch::TemplateMismatch(message) => {
+                        if template_mismatch.is_none() {
+                            template_mismatch = Some((rule, message));
+                        }
+                    }
+                    RuleMatch::NoMatch => {}
+                }
+            }
+
             if !allowed && let Some(severity) = scope.unmatched_files.as_severity() {
-                out.push(SchemaViolation {
-                    severity,
-                    code: "layout_unmatched".to_string(),
-                    message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
-                    scope_id: Some(scope.id.clone()),
-                    rule_id: None,
-                });
+                if let Some((rule, message)) = template_mismatch {
+                    out.push(SchemaViolation {
+                        severity,
+                        code: "layout_template_mismatch".to_string(),
+                        message,
+                        scope_id: Some(scope.id.clone()),
+                        rule_id: Some(rule.id.clone()),
+                        detail: None,
+                    });
+                } else {
+                    out.push(SchemaViolation {
+                        severity,
+                        code: "layout_unmatched".to_string(),
+                        message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
+                        scope_id: Some(scope.id.clone()),
+                        rule_id: None,
+                        detail: None,
+                    });
+                }
             }
         }
 
@@ -404,6 +454,7 @@ impl Schema {
                         message: format!("required scope '{}' has invalid path", scope.path),
                         scope_id: Some(scope.id.clone()),
                         rule_id: None,
+                        detail: None,
                     },
                 });
                 continue;
@@ -418,6 +469,7 @@ impl Schema {
                         message: format!("required scope '{}' is missing", scope.path),
                         scope_id: Some(scope.id.clone()),
                         rule_id: None,
+                        detail: None,
                     },
                 });
             }
@@ -443,10 +495,10 @@ impl Schema {
                     scope.id
                 )));
             }
-            validate_rules(&scope.allow, "allow")?;
-            validate_rules(&scope.deny, "deny")?;
+            validate_rules(&scope.allow, "allow", Some(scope.id.as_str()))?;
+            validate_rules(&scope.deny, "deny", Some(scope.id.as_str()))?;
         }
-        validate_rules(&self.vault.deny, "deny")?;
+        validate_rules(&self.vault.deny, "deny", None)?;
         Ok(())
     }
 
@@ -486,6 +538,7 @@ impl Schema {
                     message: "frontmatter 'type' must be a string or list of strings".to_string(),
                     scope_id: None,
                     rule_id: None,
+                    detail: None,
                 });
                 return out;
             }
@@ -499,6 +552,7 @@ impl Schema {
                     message: format!("node type '{t}' is not allowed"),
                     scope_id: None,
                     rule_id: None,
+                    detail: None,
                 });
             }
         }
@@ -541,6 +595,7 @@ impl Schema {
                         ),
                         scope_id: None,
                         rule_id: None,
+                        detail: None,
                     });
                 }
                 continue;
@@ -558,6 +613,7 @@ impl Schema {
                     ),
                     scope_id: None,
                     rule_id: None,
+                    detail: None,
                 });
             }
         }
@@ -592,6 +648,7 @@ impl Schema {
                 message: format!("path '{rel_str}' requires a note type"),
                 scope_id: Some(scope.id.clone()),
                 rule_id: None,
+                detail: None,
             }];
         }
 
@@ -618,6 +675,7 @@ impl Schema {
                     ),
                     scope_id: Some(scope.id.clone()),
                     rule_id: None,
+                    detail: None,
                 }];
             }
         }
@@ -684,6 +742,7 @@ impl Schema {
                 ),
                 scope_id: Some(scope.id.clone()),
                 rule_id: None,
+                detail: None,
             }];
         }
 
@@ -789,12 +848,15 @@ impl VaultScope {
     }
 }
 
-fn validate_rules(rules: &[LayoutRule], label: &str) -> Result<()> {
+fn validate_rules(rules: &[LayoutRule], label: &str, scope_id: Option<&str>) -> Result<()> {
     for rule in rules {
+        let prefix = rule_validation_prefix(label, scope_id, &rule.id);
         if rule.id.trim().is_empty() {
-            return Err(Error::SchemaToml(format!(
-                "{label} rule id must not be empty"
-            )));
+            let context = match scope_id {
+                Some(scope_id) => format!("scope '{scope_id}' {label} rule"),
+                None => format!("vault {label} rule"),
+            };
+            return Err(Error::SchemaToml(format!("{context} id must not be empty")));
         }
         let mut count = 0;
         if rule.glob.as_ref().is_some_and(|s| !s.trim().is_empty()) {
@@ -808,25 +870,28 @@ fn validate_rules(rules: &[LayoutRule], label: &str) -> Result<()> {
         }
         if count != 1 {
             return Err(Error::SchemaToml(format!(
-                "{label} rule '{}' must set exactly one of glob, regex, template",
-                rule.id
+                "{prefix} must set exactly one of glob, regex, template"
             )));
         }
         if let Some(pattern) = &rule.regex {
             Regex::new(pattern).map_err(|err| {
-                Error::SchemaToml(format!("{label} rule '{}' invalid regex: {err}", rule.id))
+                Error::SchemaToml(format!("{prefix} has invalid regex '{pattern}': {err}"))
             })?;
         }
         if let Some(template) = &rule.template {
             compile_template(template).map_err(|err| {
-                Error::SchemaToml(format!(
-                    "{label} rule '{}' invalid template: {err}",
-                    rule.id
-                ))
+                Error::SchemaToml(format!("{prefix} has invalid template '{template}': {err}"))
             })?;
         }
     }
     Ok(())
+}
+
+fn rule_validation_prefix(label: &str, scope_id: Option<&str>, rule_id: &str) -> String {
+    match scope_id {
+        Some(scope_id) => format!("scope '{scope_id}' {label} rule '{rule_id}'"),
+        None => format!("vault {label} rule '{rule_id}'"),
+    }
 }
 
 fn scope_matches(rel_str: &str, scope_path: &str) -> bool {
@@ -864,20 +929,33 @@ fn layout_rule_violation(
         message: format!("path '{rel_str}' matched rule '{}'", rule.id),
         scope_id,
         rule_id: Some(rule.id.clone()),
+        detail: None,
     }
 }
 
 fn rule_matches(rule: &LayoutRule, rel_str: &str) -> bool {
+    matches!(rule_match(rule, rel_str), RuleMatch::Matched)
+}
+
+fn rule_match(rule: &LayoutRule, rel_str: &str) -> RuleMatch {
     if let Some(glob) = &rule.glob {
-        return glob_matches(glob, rel_str);
+        return if glob_matches(glob, rel_str) {
+            RuleMatch::Matched
+        } else {
+            RuleMatch::NoMatch
+        };
     }
     if let Some(pattern) = &rule.regex {
-        return Regex::new(pattern).is_ok_and(|re| re.is_match(rel_str));
+        return if Regex::new(pattern).is_ok_and(|re| re.is_match(rel_str)) {
+            RuleMatch::Matched
+        } else {
+            RuleMatch::NoMatch
+        };
     }
     if let Some(template) = &rule.template {
-        return template_matches(template, rel_str);
+        return template_match(rule, template, rel_str);
     }
-    false
+    RuleMatch::NoMatch
 }
 
 fn glob_matches(pattern: &str, rel_str: &str) -> bool {
@@ -927,82 +1005,337 @@ fn glob_to_regex(pattern: &str) -> std::result::Result<Regex, regex::Error> {
     Regex::new(&regex)
 }
 
-fn template_matches(template: &str, rel_str: &str) -> bool {
+enum RuleMatch {
+    Matched,
+    NoMatch,
+    TemplateMismatch(String),
+}
+
+enum TemplateMatch {
+    Matched,
+    Mismatch(String),
+}
+
+#[derive(Clone, Copy)]
+struct TemplateTokenSpec {
+    name: &'static str,
+    pattern: &'static str,
+    label: &'static str,
+    example: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum TemplateSegmentKind {
+    Empty,
+    SingleToken(&'static TemplateTokenSpec),
+    Composite,
+}
+
+struct TemplateSegment {
+    raw: String,
+    regex: Regex,
+    kind: TemplateSegmentKind,
+    example: String,
+}
+
+struct TemplatePattern {
+    example: String,
+    regex: Regex,
+    vars: Vec<String>,
+    segments: Vec<TemplateSegment>,
+}
+
+const TEMPLATE_TOKEN_SPECS: &[TemplateTokenSpec] = &[
+    TemplateTokenSpec {
+        name: "year",
+        pattern: "\\d{4}",
+        label: "4 digits",
+        example: "2026",
+    },
+    TemplateTokenSpec {
+        name: "month",
+        pattern: "\\d{2}",
+        label: "2 digits",
+        example: "02",
+    },
+    TemplateTokenSpec {
+        name: "day",
+        pattern: "\\d{2}",
+        label: "2 digits",
+        example: "03",
+    },
+    TemplateTokenSpec {
+        name: "week",
+        pattern: "\\d{2}",
+        label: "2 digits",
+        example: "07",
+    },
+    TemplateTokenSpec {
+        name: "slug",
+        pattern: "[a-z0-9][a-z0-9-]*",
+        label: "lowercase kebab-case",
+        example: "my-note",
+    },
+];
+
+fn template_token_spec(name: &str) -> Option<&'static TemplateTokenSpec> {
+    TEMPLATE_TOKEN_SPECS.iter().find(|spec| spec.name == name)
+}
+
+fn template_token_catalog() -> String {
+    TEMPLATE_TOKEN_SPECS
+        .iter()
+        .map(|spec| format!("{{{}}} ({})", spec.name, spec.label))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn template_match(_rule: &LayoutRule, template: &str, rel_str: &str) -> RuleMatch {
+    match template_match_inner(template, rel_str) {
+        TemplateMatch::Matched => RuleMatch::Matched,
+        TemplateMatch::Mismatch(message) => RuleMatch::TemplateMismatch(message),
+    }
+}
+
+fn template_match_inner(template: &str, rel_str: &str) -> TemplateMatch {
     let Ok(compiled) = compile_template(template) else {
-        return false;
+        return TemplateMatch::Mismatch("path does not match template".to_string());
     };
+
+    if let Some(message) = diagnose_template_mismatch(&compiled, rel_str) {
+        return TemplateMatch::Mismatch(message);
+    }
+
+    TemplateMatch::Matched
+}
+
+fn diagnose_template_mismatch(compiled: &TemplatePattern, rel_str: &str) -> Option<String> {
+    let actual_segments: Vec<&str> = if rel_str.is_empty() {
+        vec![""]
+    } else {
+        rel_str.split('/').collect()
+    };
+
+    if actual_segments.len() != compiled.segments.len() {
+        return Some(format!(
+            "path must have {} segments; got {}",
+            compiled.segments.len(),
+            actual_segments.len()
+        ));
+    }
+
+    for (segment, actual) in compiled.segments.iter().zip(actual_segments.iter()) {
+        if segment.regex.is_match(actual) {
+            continue;
+        }
+
+        if let Some(message) = single_token_segment_mismatch_message(segment, actual) {
+            return Some(message);
+        }
+
+        return Some(match segment.kind {
+            TemplateSegmentKind::SingleToken(spec) => {
+                format!("{} must be {}; got \"{}\"", spec.name, spec.label, actual)
+            }
+            TemplateSegmentKind::Empty | TemplateSegmentKind::Composite => {
+                format!(
+                    "segment must look like \"{}\"; got \"{}\"",
+                    segment.example, actual
+                )
+            }
+        });
+    }
+
     let Some(caps) = compiled.regex.captures(rel_str) else {
-        return false;
+        return Some(format!(
+            "path must look like \"{}\"; got \"{}\"",
+            compiled.example, rel_str
+        ));
     };
+
     let mut seen: HashMap<&str, &str> = HashMap::new();
     for (idx, name) in compiled.vars.iter().enumerate() {
         let Some(m) = caps.get(idx + 1) else {
-            return false;
+            continue;
         };
         if let Some(existing) = seen.get(name.as_str()) {
             if existing != &m.as_str() {
-                return false;
+                return Some(format!(
+                    "{name} must match earlier value \"{existing}\"; got \"{}\"",
+                    m.as_str()
+                ));
             }
         } else {
             seen.insert(name.as_str(), m.as_str());
         }
     }
-    true
+
+    None
 }
 
-struct TemplatePattern {
-    regex: Regex,
-    vars: Vec<String>,
+fn single_token_segment_mismatch_message(
+    segment: &TemplateSegment,
+    actual: &str,
+) -> Option<String> {
+    let start = segment.raw.find('{')?;
+    let end = segment.raw[start..].find('}')? + start;
+    if segment.raw[end + 1..].contains('{') {
+        return None;
+    }
+
+    let token_name = segment.raw[start + 1..end].trim();
+    let spec = template_token_spec(token_name)?;
+    let prefix = &segment.raw[..start];
+    let suffix = &segment.raw[end + 1..];
+
+    if !actual.starts_with(prefix) || !actual.ends_with(suffix) {
+        return None;
+    }
+
+    let suffix_len = suffix.len();
+    let token_end = actual.len().checked_sub(suffix_len)?;
+    if token_end < prefix.len() {
+        return None;
+    }
+
+    let token_value = &actual[prefix.len()..token_end];
+    Some(format!(
+        "{} must be {}; got \"{}\"",
+        spec.name, spec.label, token_value
+    ))
 }
 
 #[allow(clippy::while_let_on_iterator)]
 fn compile_template(template: &str) -> std::result::Result<TemplatePattern, String> {
     let mut regex = String::from("^");
     let mut vars = Vec::new();
+    let mut segments = Vec::new();
     let mut chars = template.chars().peekable();
+    let mut segment_regex = String::from("^");
+    let mut segment_raw = String::new();
+    let mut segment_example = String::new();
+    let mut segment_kind = TemplateSegmentKind::Empty;
+
     while let Some(ch) = chars.next() {
         if ch == '{' {
             let mut token = String::new();
+            let mut closed = false;
             for next in chars.by_ref() {
                 if next == '}' {
+                    closed = true;
                     break;
                 }
                 token.push(next);
             }
-            if token.is_empty() || !token.contains(':') {
-                return Err("template tokens must be {name:format}".to_string());
+            if !closed {
+                return Err(format!(
+                    "template tokens must be {{name}}; allowed tokens: {}",
+                    template_token_catalog()
+                ));
             }
-            let mut parts = token.splitn(2, ':');
-            let name = parts.next().unwrap().trim();
-            let fmt = parts.next().unwrap().trim();
-            if name.is_empty() || fmt.is_empty() {
-                return Err("template tokens must be {name:format}".to_string());
+            let name = token.trim();
+            if name.is_empty() || name.contains(':') {
+                return Err(format!(
+                    "invalid template token '{{{name}}}'; template tokens must be {{name}}; allowed tokens: {}",
+                    template_token_catalog()
+                ));
             }
-            let re = match fmt {
-                "yyyy" => "\\d{4}",
-                "mm" | "dd" | "ww" => "\\d{2}",
-                "slug" => "[a-z0-9][a-z0-9-]*",
-                _ => return Err(format!("unknown template format '{fmt}'")),
-            };
+            let spec = template_token_spec(name).ok_or_else(|| {
+                format!(
+                    "unknown template token '{{{name}}}'; allowed tokens: {}",
+                    template_token_catalog()
+                )
+            })?;
             regex.push('(');
-            regex.push_str(re);
+            regex.push_str(spec.pattern);
             regex.push(')');
+            segment_regex.push('(');
+            segment_regex.push_str(spec.pattern);
+            segment_regex.push(')');
+            segment_raw.push('{');
+            segment_raw.push_str(name);
+            segment_raw.push('}');
+            segment_example.push_str(spec.example);
+            segment_kind = match segment_kind {
+                TemplateSegmentKind::Empty => TemplateSegmentKind::SingleToken(spec),
+                TemplateSegmentKind::SingleToken(_) | TemplateSegmentKind::Composite => {
+                    TemplateSegmentKind::Composite
+                }
+            };
             vars.push(name.to_string());
+            continue;
+        }
+
+        if ch == '/' {
+            segments.push(build_template_segment(
+                &segment_regex,
+                &segment_raw,
+                segment_kind,
+                &segment_example,
+            )?);
+            regex.push('/');
+            segment_regex.clear();
+            segment_regex.push('^');
+            segment_raw.clear();
+            segment_example.clear();
+            segment_kind = TemplateSegmentKind::Empty;
             continue;
         }
 
         match ch {
             '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
                 regex.push('\\');
+                segment_regex.push('\\');
                 regex.push(ch);
+                segment_regex.push(ch);
             }
-            _ => regex.push(ch),
+            _ => {
+                regex.push(ch);
+                segment_regex.push(ch);
+            }
         }
+
+        segment_raw.push(ch);
+        segment_example.push(ch);
+        segment_kind = TemplateSegmentKind::Composite;
     }
 
+    segments.push(build_template_segment(
+        &segment_regex,
+        &segment_raw,
+        segment_kind,
+        &segment_example,
+    )?);
     regex.push('$');
     let regex = Regex::new(&regex).map_err(|err| err.to_string())?;
-    Ok(TemplatePattern { regex, vars })
+    let example = segments
+        .iter()
+        .map(|segment| segment.example.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(TemplatePattern {
+        example,
+        regex,
+        vars,
+        segments,
+    })
+}
+
+fn build_template_segment(
+    segment_regex: &str,
+    raw: &str,
+    kind: TemplateSegmentKind,
+    example: &str,
+) -> std::result::Result<TemplateSegment, String> {
+    let mut regex_source = segment_regex.to_string();
+    regex_source.push('$');
+    let regex = Regex::new(&regex_source).map_err(|err| err.to_string())?;
+    Ok(TemplateSegment {
+        raw: raw.to_string(),
+        regex,
+        kind,
+        example: example.to_string(),
+    })
 }
 
 fn schema_path_for_vault(vault: &Vault) -> PathBuf {

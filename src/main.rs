@@ -51,7 +51,7 @@ fn emit_json<T: serde::Serialize>(data: &T) {
     };
     println!(
         "{}",
-        serde_json::to_string_pretty(&envelope).expect("json serialization")
+        serde_json::to_string(&envelope).expect("json serialization")
     );
 }
 
@@ -66,8 +66,16 @@ fn emit_json_error(code: &str, message: &str) {
     };
     println!(
         "{}",
-        serde_json::to_string_pretty(&envelope).expect("json serialization")
+        serde_json::to_string(&envelope).expect("json serialization")
     );
+}
+
+fn format_schema_status(status: &oxidian::SchemaStatus) -> String {
+    match status {
+        oxidian::SchemaStatus::Disabled => "disabled".to_string(),
+        oxidian::SchemaStatus::Loaded { version, .. } => format!("loaded (version {version})"),
+        oxidian::SchemaStatus::Error { .. } => "invalid schema".to_string(),
+    }
 }
 
 /// Emit a progress message to stderr, unless `--quiet` is set.
@@ -1395,10 +1403,15 @@ async fn handle_check(
                 }
                 OutputFormat::Text => {
                     println!("schema");
-                    println!("  status: {:?}", report.status);
+                    println!("  status: {}", format_schema_status(&report.status));
                     println!("  errors: {}", report.errors);
                     println!("  warnings: {}", report.warnings);
                     println!("  total_violations: {}", violations.len());
+
+                    if let oxidian::SchemaStatus::Error { error, .. } = &report.status {
+                        println!("\nschema_errors:");
+                        println!("- {error}");
+                    }
 
                     if !violations.is_empty() {
                         println!("\nviolations:");
@@ -2077,9 +2090,7 @@ fn build_kg_schema() -> Schema {
                     description: None,
                     glob: None,
                     regex: None,
-                    template: Some(
-                        "{year:yyyy}/{week:ww}/{year:yyyy}-{month:mm}-{day:dd}.md".into(),
-                    ),
+                    template: Some("{year}/{week}/{year}-{month}-{day}.md".into()),
                     severity: SchemaSeverity::Warn,
                 }],
                 deny: Vec::new(),
@@ -2149,7 +2160,7 @@ fn build_kg_memory_schema() -> Schema {
             description: None,
             glob: None,
             regex: None,
-            template: Some("{year:yyyy}/{month:mm}/{day:dd}/{slug:slug}.md".into()),
+            template: Some("{year}/{month}/{day}/{slug}.md".into()),
             severity: SchemaSeverity::Error,
         }],
         deny: Vec::new(),
@@ -2358,6 +2369,6 @@ mod tests {
         assert!(text.contains("[vault]"));
         assert!(text.contains("[[vault.scopes]]"));
         assert!(text.contains("memory"));
-        assert!(text.contains("{year:yyyy}/{month:mm}/{day:dd}/{slug:slug}.md"));
+        assert!(text.contains("{year}/{month}/{day}/{slug}.md"));
     }
 }

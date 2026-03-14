@@ -4,6 +4,40 @@ import Sigma from "sigma";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import type { GraphPayload, GraphNode, GraphSettings, LayoutMode } from "../types";
 
+interface SigmaNodeAttributes {
+  label: string;
+  fullLabel: string;
+  size: number;
+  color: string;
+  nodeKind: GraphNode["kind"];
+  clusterId?: number;
+  x: number;
+  y: number;
+  zIndex?: number;
+}
+
+interface SigmaEdgeAttributes {
+  size?: number;
+  color?: string;
+  weight?: number;
+}
+
+interface GraphInstance {
+  nodes(): string[];
+  setNodeAttribute(node: string, name: string, value: unknown): void;
+  getNodeAttribute(node: string, name: string): unknown;
+  forEachNode(callback: (id: string, attrs: SigmaNodeAttributes) => void): void;
+  hasEdge(edge: string): boolean;
+  hasEdge(source: string, target: string): boolean;
+  addEdgeWithKey(key: string, source: string, target: string, attrs?: SigmaEdgeAttributes): void;
+  dropEdge(edge: string): void;
+  clear(): void;
+  addNode(node: string, attrs: SigmaNodeAttributes): void;
+  hasNode(node: string): boolean;
+  source(edge: string): string;
+  target(edge: string): string;
+}
+
 /* ── colour helpers ─────────────────────────────────────────────────── */
 
 const NODE_COLORS: Record<string, string> = {
@@ -103,7 +137,7 @@ interface SigmaCanvasProps {
 export function SigmaCanvas({ payload, settings }: SigmaCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<Sigma | null>(null);
-  const graphRef = useRef(new Graph());
+  const graphRef = useRef<GraphInstance>(new Graph() as unknown as GraphInstance);
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
   const hoveredRef = useRef<string | null>(null);
   const prevLayoutRef = useRef<LayoutMode>(settings.layout);
@@ -147,12 +181,12 @@ export function SigmaCanvas({ payload, settings }: SigmaCanvasProps) {
         return;
       }
 
-      if (layout === "circle") {
-        const radius = Math.max(2.5, ids.length / 12);
-        ids.forEach((id, index) => {
-          const angle = (index / ids.length) * Math.PI * 2;
-          const x = Math.cos(angle) * radius;
-          const y = Math.sin(angle) * radius;
+        if (layout === "circle") {
+          const radius = Math.max(2.5, ids.length / 12);
+          ids.forEach((id: string, index: number) => {
+            const angle = (index / ids.length) * Math.PI * 2;
+            const x = Math.cos(angle) * radius;
+            const y = Math.sin(angle) * radius;
           graph.setNodeAttribute(id, "x", x);
           graph.setNodeAttribute(id, "y", y);
           positions.set(id, { x, y });
@@ -184,7 +218,7 @@ export function SigmaCanvas({ payload, settings }: SigmaCanvasProps) {
         const tempEdges: string[] = [];
         if (layout === "forceatlas2-cluster") {
           const clusters = new Map<number, string[]>();
-          graph.forEachNode((id, attrs) => {
+          graph.forEachNode((id: string, attrs: SigmaNodeAttributes) => {
             const cid = attrs.clusterId as number | undefined;
             const kind = attrs.nodeKind as string;
             if (cid == null || kind === "tag") return;
@@ -218,7 +252,7 @@ export function SigmaCanvas({ payload, settings }: SigmaCanvasProps) {
         forceAtlas2.assign(graph, {
           iterations: layout === "forceatlas2-cluster" ? 90 : 80,
           settings: fa2Settings,
-          getEdgeWeight: (_edge, attr) =>
+          getEdgeWeight: (_edge: string, attr: SigmaEdgeAttributes) =>
             (attr.weight as number | undefined) ?? 1,
         });
 
@@ -228,7 +262,7 @@ export function SigmaCanvas({ payload, settings }: SigmaCanvasProps) {
         });
 
         // sync positions
-        graph.forEachNode((id) => {
+        graph.forEachNode((id: string) => {
           positions.set(id, {
             x: graph.getNodeAttribute(id, "x") as number,
             y: graph.getNodeAttribute(id, "y") as number,

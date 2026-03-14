@@ -176,7 +176,7 @@ unmatched_files = "error"
 
 [[vault.scopes.allow]]
 id = "journal_entry"
-template = "{{year:yyyy}}/{{year:yyyy}}-{{month:mm}}-{{day:dd}}.md"
+template = "{{year}}/{{year}}-{{month}}-{{day}}.md"
 "#,
         base_schema()
     );
@@ -189,12 +189,53 @@ template = "{{year:yyyy}}/{{year:yyyy}}-{{month:mm}}-{{day:dd}}.md"
     let report = index.schema_report();
 
     assert!(report.errors > 0);
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|v| v.violation.code == "layout_unmatched")
+    let violation = report
+        .violations
+        .iter()
+        .find(|v| v.violation.code == "layout_template_mismatch")
+        .expect("template mismatch violation");
+    assert_eq!(violation.violation.detail, None);
+    assert_eq!(
+        violation.violation.message,
+        "year must match earlier value \"2026\"; got \"2027\""
     );
+}
+
+#[test]
+fn old_template_format_syntax_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("vault");
+    fs::create_dir_all(&root).expect("create vault");
+
+    let schema = format!(
+        r#"{}
+
+[[vault.scopes]]
+id = "journal"
+path = "journal"
+required = true
+unmatched_files = "error"
+
+[[vault.scopes.allow]]
+id = "journal_entry"
+template = "{{year:yyyy}}/{{month}}/{{day}}.md"
+"#,
+        base_schema()
+    );
+
+    write_schema(&root, &schema);
+
+    let vault = Vault::open(&root).expect("open vault");
+    let index = VaultIndex::build(&vault).expect("build index");
+
+    match index.schema_status() {
+        SchemaStatus::Error { error, .. } => {
+            assert!(error.contains("template tokens must be {name}"));
+            assert!(error.contains("{year}"));
+            assert!(error.contains("{slug}"));
+        }
+        status => panic!("expected schema error, got {status:?}"),
+    }
 }
 
 #[test]
@@ -254,7 +295,7 @@ unmatched_files = "error"
 
 [[vault.scopes.allow]]
 id = "memory_entry"
-template = "{{year:yyyy}}/{{month:mm}}/{{day:dd}}/{{slug:slug}}.md"
+template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
 
 [vault.scopes.notes.type]
 required = true
@@ -272,11 +313,15 @@ severity = "error"
     let report = index.schema_report();
 
     assert!(report.errors > 0);
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|v| v.violation.code == "layout_unmatched")
+    let violation = report
+        .violations
+        .iter()
+        .find(|v| v.violation.code == "layout_template_mismatch")
+        .expect("template mismatch violation");
+    assert_eq!(violation.violation.detail, None);
+    assert_eq!(
+        violation.violation.message,
+        "path must have 4 segments; got 3"
     );
 }
 
@@ -297,7 +342,7 @@ unmatched_files = "error"
 
 [[vault.scopes.allow]]
 id = "memory_entry"
-template = "{{year:yyyy}}/{{month:mm}}/{{day:dd}}/{{slug:slug}}.md"
+template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
 
 [vault.scopes.notes.type]
 required = true
@@ -340,7 +385,7 @@ unmatched_files = "error"
 
 [[vault.scopes.allow]]
 id = "memory_entry"
-template = "{{year:yyyy}}/{{month:mm}}/{{day:dd}}/{{slug:slug}}.md"
+template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
 
 [vault.scopes.notes.type]
 required = true
@@ -390,7 +435,7 @@ unmatched_files = "error"
 
 [[vault.scopes.allow]]
 id = "memory_entry"
-template = "{{year:yyyy}}/{{month:mm}}/{{day:dd}}/{{slug:slug}}.md"
+template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
 
 [vault.scopes.notes.type]
 required = true
@@ -415,11 +460,69 @@ severity = "error"
     let report = index.schema_report();
 
     assert!(report.errors > 0);
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|v| v.violation.code == "layout_unmatched")
+    let violation = report
+        .violations
+        .iter()
+        .find(|v| v.violation.code == "layout_template_mismatch")
+        .expect("template mismatch violation");
+    assert_eq!(violation.violation.detail, None);
+    assert_eq!(
+        violation.violation.message,
+        "slug must be lowercase kebab-case; got \"BadSlug\""
+    );
+}
+
+#[test]
+fn memory_scope_requires_zero_padded_day() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("vault");
+    fs::create_dir_all(&root).expect("create vault");
+
+    let schema = format!(
+        r#"{}
+
+[[vault.scopes]]
+id = "memory"
+path = "memory"
+required = true
+unmatched_files = "error"
+
+[[vault.scopes.allow]]
+id = "memory_entry"
+template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
+
+[vault.scopes.notes.type]
+required = true
+allowed = ["memory"]
+severity = "error"
+"#,
+        base_schema()
+    );
+
+    write_schema(&root, &schema);
+    write_note(
+        &root,
+        "memory/2026/02/3/remember.md",
+        "---\n\
+         type: memory\n\
+         ---\n\
+         body\n",
+    );
+
+    let vault = Vault::open(&root).expect("open vault");
+    let index = VaultIndex::build(&vault).expect("build index");
+    let report = index.schema_report();
+
+    assert!(report.errors > 0);
+    let violation = report
+        .violations
+        .iter()
+        .find(|v| v.violation.code == "layout_template_mismatch")
+        .expect("template mismatch violation");
+    assert_eq!(violation.violation.detail, None);
+    assert_eq!(
+        violation.violation.message,
+        "day must be 2 digits; got \"3\""
     );
 }
 
@@ -440,7 +543,7 @@ unmatched_files = "error"
 
 [[vault.scopes.allow]]
 id = "memory_entry"
-template = "{{year:yyyy}}/{{month:mm}}/{{day:dd}}/{{slug:slug}}.md"
+template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
 
 [vault.scopes.notes.type]
 required = true
@@ -495,7 +598,7 @@ unmatched_files = "error"
 
 [[vault.scopes.allow]]
 id = "memory_entry"
-template = "{{year:yyyy}}/{{month:mm}}/{{day:dd}}/{{slug:slug}}.md"
+template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
 
 [vault.scopes.notes.type]
 required = true

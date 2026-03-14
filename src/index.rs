@@ -412,6 +412,7 @@ impl VaultIndex {
                             ),
                             scope_id: Some(scope.id.clone()),
                             rule_id: None,
+                            detail: None,
                         },
                     });
                 }

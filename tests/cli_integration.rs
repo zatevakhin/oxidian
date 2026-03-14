@@ -68,7 +68,7 @@ fn missing_vault_errors_json() {
         .args(["--output", "json", "stats"])
         .assert()
         .failure()
-        .stdout(predicate::str::contains(r#""ok": false"#))
+        .stdout(predicate::str::contains(r#""ok":false"#))
         .stdout(predicate::str::contains("--vault is required"));
 }
 
@@ -597,11 +597,135 @@ fn check_schema_json_output() {
         .unwrap();
 
     assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("\n  "));
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["ok"], true);
     assert!(json["data"]["errors"].is_u64());
     assert!(json["data"]["warnings"].is_u64());
     assert!(json["data"]["violations"].is_array());
+}
+
+#[test]
+fn check_schema_text_explains_slug_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    fs::create_dir_all(vault.join("memory/2026/02/11")).unwrap();
+    fs::create_dir_all(vault.join(".obsidian/oxidian")).unwrap();
+    fs::write(
+        vault.join(".obsidian/oxidian/schema.toml"),
+        r#"version = 1
+
+[node]
+types = ["memory"]
+
+[node.type.docs]
+memory = "Memory entry"
+
+[predicates.aliases]
+
+[vault]
+scope_resolution = "most_specific"
+unscoped = "allow"
+
+[[vault.scopes]]
+id = "memory"
+path = "memory"
+required = true
+unmatched_files = "error"
+
+[[vault.scopes.allow]]
+id = "memory_entry"
+template = "{year}/{month}/{day}/{slug}.md"
+
+[vault.scopes.notes.type]
+required = true
+allowed = ["memory"]
+severity = "error"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        vault.join("memory/2026/02/11/Bad Slug.md"),
+        "---\ntype: memory\n---\nbody\n",
+    )
+    .unwrap();
+
+    cmd()
+        .args(["--vault", vault.to_str().unwrap(), "check", "schema"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("layout_template_mismatch"))
+        .stdout(predicate::str::contains(
+            "slug must be lowercase kebab-case; got \"Bad Slug\"",
+        ));
+}
+
+#[test]
+fn check_schema_json_uses_simple_template_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    fs::create_dir_all(vault.join("memory/2026/02/3")).unwrap();
+    fs::create_dir_all(vault.join(".obsidian/oxidian")).unwrap();
+    fs::write(
+        vault.join(".obsidian/oxidian/schema.toml"),
+        r#"version = 1
+
+[node]
+types = ["memory"]
+
+[node.type.docs]
+memory = "Memory entry"
+
+[predicates.aliases]
+
+[vault]
+scope_resolution = "most_specific"
+unscoped = "allow"
+
+[[vault.scopes]]
+id = "memory"
+path = "memory"
+required = true
+unmatched_files = "error"
+
+[[vault.scopes.allow]]
+id = "memory_entry"
+template = "{year}/{month}/{day}/{slug}.md"
+
+[vault.scopes.notes.type]
+required = true
+allowed = ["memory"]
+severity = "error"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        vault.join("memory/2026/02/3/remember.md"),
+        "---\ntype: memory\n---\nbody\n",
+    )
+    .unwrap();
+
+    let output = cmd()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "-o",
+            "json",
+            "check",
+            "schema",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("\n  "));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let violation = &json["data"]["violations"][0]["violation"];
+    assert_eq!(violation["code"], "layout_template_mismatch");
+    assert_eq!(violation["message"], "day must be 2 digits; got \"3\"");
+    assert!(violation.get("detail").is_none());
 }
 
 // ---------------------------------------------------------------------------
