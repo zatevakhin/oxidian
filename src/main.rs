@@ -8,10 +8,9 @@ use std::sync::Once;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxidian::{
-    FileKind, LayoutRule, Link, LinkIssueKind, LinkIssueReason, LinkKind, NodeSchema,
-    NodeTypeSchema, PredicateDef, PredicatesSchema, Query, Schema, SchemaSeverity, ScopeResolution,
-    SortDir, Tag, TaskQuery, TaskStatus, UnmatchedBehavior, Vault, VaultPath, VaultSchema,
-    VaultScope, VaultService,
+    FileKind, InheritKind, LayoutRule, LayoutRuleEntry, Link, LinkIssueKind, LinkIssueReason,
+    LinkKind, PredicateDef, Query, Schema, SchemaSeverity, ScopeDef, SortDir, Tag, TaskQuery,
+    TaskStatus, UnmatchedBehavior, Vault, VaultPath, VaultSchema, VaultService,
 };
 
 #[cfg(feature = "similarity")]
@@ -1672,32 +1671,18 @@ fn generate_schema_template(template: SchemaTemplate) -> Schema {
 }
 
 fn build_para_schema() -> Schema {
-    let node = NodeSchema {
-        types: vec![
-            "project".into(),
-            "area".into(),
-            "resource".into(),
-            "archive".into(),
-            "person".into(),
-            "concept".into(),
-            "doc".into(),
-            "tool".into(),
-        ],
-        type_def: NodeTypeSchema {
-            docs: map_str([
-                ("project", "Active outcomes with a deadline."),
-                ("area", "Ongoing responsibility."),
-                ("resource", "Reference or topic material."),
-                ("archive", "Inactive items."),
-                ("person", "People."),
-                ("concept", "Ideas, techniques, terms."),
-                ("doc", "Notes, docs, pages, specs."),
-                ("tool", "Software, tools, services."),
-            ]),
-        },
-    };
-
-    let predicates = PredicatesSchema {
+    Schema {
+        version: 1,
+        types: map_str([
+            ("project", "Active outcomes with a deadline."),
+            ("area", "Ongoing responsibility."),
+            ("resource", "Reference or topic material."),
+            ("archive", "Inactive items."),
+            ("person", "People."),
+            ("concept", "Ideas, techniques, terms."),
+            ("doc", "Notes, docs, pages, specs."),
+            ("tool", "Software, tools, services."),
+        ]),
         aliases: map_str([
             ("requires", "depends_on"),
             ("required_by", "dependency_of"),
@@ -1706,167 +1691,93 @@ fn build_para_schema() -> Schema {
             ("cites", "references"),
             ("ref", "references"),
         ]),
-        defs: map_defs([
-            (
+        predicates: map_preds([
+            pred(
                 "depends_on",
-                PredicateDef {
-                    description: "A requires B to function or proceed.".into(),
-                    domain: vec!["project", "area", "resource", "doc"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: Some("dependency_of".into()),
-                    symmetric: false,
-                    severity: SchemaSeverity::Error,
-                },
-            ),
-            (
-                "related_to",
-                PredicateDef {
-                    description: "Loose association (symmetric).".into(),
-                    domain: vec!["*"].into_iter().map(str::to_string).collect(),
-                    inverse: None,
-                    symmetric: true,
-                    severity: SchemaSeverity::Warn,
-                },
-            ),
-            (
+                "A requires B to function or proceed.",
+                &["project", "area", "resource", "doc"],
+            )
+            .inverse("dependency_of")
+            .severity(SchemaSeverity::Error),
+            pred("related_to", "Loose association (symmetric).", &["*"]).symmetric(),
+            pred(
                 "references",
-                PredicateDef {
-                    description: "A cites/points to B (stronger than plain links).".into(),
-                    domain: vec!["doc", "resource", "project", "area"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A cites/points to B (stronger than plain links).",
+                &["doc", "resource", "project", "area"],
             ),
-            (
+            pred(
                 "part_of",
-                PredicateDef {
-                    description: "Composition: A is part of B.".into(),
-                    domain: vec!["resource", "doc", "project", "area", "archive"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "Composition: A is part of B.",
+                &["resource", "doc", "project", "area", "archive"],
             ),
-            (
+            pred(
                 "supports",
-                PredicateDef {
-                    description: "A supports B (resource -> project/area).".into(),
-                    domain: vec!["resource", "doc"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A supports B (resource -> project/area).",
+                &["resource", "doc"],
             ),
         ]),
-    };
-
-    let vault = VaultSchema {
-        scope_resolution: ScopeResolution::MostSpecific,
-        unscoped: UnmatchedBehavior::Allow,
-        deny: Vec::new(),
-        scopes: vec![
-            scope_notes(
-                "projects",
-                "projects",
-                Some("Projects (outcomes)"),
-                true,
-                UnmatchedBehavior::Warn,
-            ),
-            scope_notes(
-                "areas",
-                "areas",
-                Some("Areas (ongoing responsibilities)"),
-                true,
-                UnmatchedBehavior::Warn,
-            ),
-            scope_notes(
-                "resources",
-                "resources",
-                Some("Resources (topics, references)"),
-                true,
-                UnmatchedBehavior::Warn,
-            ),
-            scope_notes(
-                "archives",
-                "archives",
-                Some("Archives (inactive)"),
-                true,
-                UnmatchedBehavior::Warn,
-            ),
-            VaultScope {
-                id: "inbox".into(),
-                path: "inbox".into(),
-                required: true,
-                description: Some("Capture".into()),
-                unmatched_files: UnmatchedBehavior::Allow,
-                allow: Vec::new(),
-                deny: Vec::new(),
-                inherit_allow: false,
-                inherit_deny: false,
-                inherit_notes: false,
-                kinds: Vec::new(),
-                extensions: Vec::new(),
-                notes: None,
-                orphan_attachments: None,
-            },
-        ],
-    };
-
-    Schema {
-        version: 1,
-        node,
-        predicates,
-        vault,
+        vault: VaultSchema {
+            scopes: scopes([
+                scope_notes(
+                    "projects",
+                    None,
+                    Some("Projects (outcomes)"),
+                    true,
+                    UnmatchedBehavior::Warn,
+                ),
+                scope_notes(
+                    "areas",
+                    None,
+                    Some("Areas (ongoing responsibilities)"),
+                    true,
+                    UnmatchedBehavior::Warn,
+                ),
+                scope_notes(
+                    "resources",
+                    None,
+                    Some("Resources (topics, references)"),
+                    true,
+                    UnmatchedBehavior::Warn,
+                ),
+                scope_notes(
+                    "archives",
+                    None,
+                    Some("Archives (inactive)"),
+                    true,
+                    UnmatchedBehavior::Warn,
+                ),
+                (
+                    "inbox",
+                    ScopeDef {
+                        required: true,
+                        description: Some("Capture".into()),
+                        unmatched: UnmatchedBehavior::Allow,
+                        ..ScopeDef::default()
+                    },
+                ),
+            ]),
+            ..VaultSchema::default()
+        },
     }
 }
 
 fn build_kg_schema() -> Schema {
-    let node = NodeSchema {
-        types: vec![
-            "concept".into(),
-            "entity".into(),
-            "journal".into(),
-            "person".into(),
-            "org".into(),
-            "project".into(),
-            "system".into(),
-            "tool".into(),
-            "document".into(),
-            "claim".into(),
-            "evidence".into(),
-            "task".into(),
-        ],
-        type_def: NodeTypeSchema {
-            docs: map_str([
-                ("concept", "Ideas, techniques, terms, taxonomies."),
-                ("entity", "Concrete named things (non-person/org)."),
-                ("journal", "Daily journal entry."),
-                ("person", "People."),
-                ("org", "Organizations or teams."),
-                ("project", "Initiatives with outcomes."),
-                ("system", "Composed systems or products."),
-                ("tool", "Software tools or services."),
-                ("document", "Docs, papers, specs, notes."),
-                ("claim", "Statements that can be supported or contradicted."),
-                ("evidence", "Evidence backing claims."),
-                ("task", "Tasks or benchmarks."),
-            ]),
-        },
-    };
-
-    let predicates = PredicatesSchema {
+    Schema {
+        version: 1,
+        types: map_str([
+            ("concept", "Ideas, techniques, terms, taxonomies."),
+            ("entity", "Concrete named things (non-person/org)."),
+            ("journal", "Daily journal entry."),
+            ("person", "People."),
+            ("org", "Organizations or teams."),
+            ("project", "Initiatives with outcomes."),
+            ("system", "Composed systems or products."),
+            ("tool", "Software tools or services."),
+            ("document", "Docs, papers, specs, notes."),
+            ("claim", "Statements that can be supported or contradicted."),
+            ("evidence", "Evidence backing claims."),
+            ("task", "Tasks or benchmarks."),
+        ]),
         aliases: map_str([
             ("relates_to", "related_to"),
             ("similar_to", "related_to"),
@@ -1877,444 +1788,246 @@ fn build_kg_schema() -> Schema {
             ("references", "cites"),
             ("ref", "cites"),
         ]),
-        defs: map_defs([
-            (
-                "is_a",
-                PredicateDef {
-                    description: "Classification: A is a kind of B.".into(),
-                    domain: vec!["*"].into_iter().map(str::to_string).collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Error,
-                },
-            ),
-            (
+        predicates: map_preds([
+            pred("is_a", "Classification: A is a kind of B.", &["*"])
+                .severity(SchemaSeverity::Error),
+            pred(
                 "instance_of",
-                PredicateDef {
-                    description: "Instance of a concept.".into(),
-                    domain: vec![
-                        "entity", "system", "tool", "project", "task", "person", "org",
-                    ]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "Instance of a concept.",
+                &[
+                    "entity", "system", "tool", "project", "task", "person", "org",
+                ],
             ),
-            (
+            pred(
                 "part_of",
-                PredicateDef {
-                    description: "Composition: A is part of B.".into(),
-                    domain: vec!["entity", "system", "project", "document"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "Composition: A is part of B.",
+                &["entity", "system", "project", "document"],
             ),
-            (
-                "related_to",
-                PredicateDef {
-                    description: "Loose association (symmetric).".into(),
-                    domain: vec!["*"].into_iter().map(str::to_string).collect(),
-                    inverse: None,
-                    symmetric: true,
-                    severity: SchemaSeverity::Warn,
-                },
-            ),
-            (
+            pred("related_to", "Loose association (symmetric).", &["*"]).symmetric(),
+            pred(
                 "supports",
-                PredicateDef {
-                    description: "Evidence supports a claim or concept.".into(),
-                    domain: vec!["evidence", "document"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "Evidence supports a claim or concept.",
+                &["evidence", "document"],
             ),
-            (
+            pred(
                 "contradicts",
-                PredicateDef {
-                    description: "Evidence contradicts a claim or concept.".into(),
-                    domain: vec!["evidence", "document"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "Evidence contradicts a claim or concept.",
+                &["evidence", "document"],
             ),
-            (
+            pred(
                 "uses",
-                PredicateDef {
-                    description: "A uses B in implementation or workflow.".into(),
-                    domain: vec!["system", "project", "tool"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A uses B in implementation or workflow.",
+                &["system", "project", "tool"],
             ),
-            (
+            pred(
                 "cites",
-                PredicateDef {
-                    description: "A cites B (stronger than plain links).".into(),
-                    domain: vec!["document", "claim", "evidence"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A cites B (stronger than plain links).",
+                &["document", "claim", "evidence"],
             ),
-            (
+            pred(
                 "owned_by",
-                PredicateDef {
-                    description: "A is owned/maintained by a person/org.".into(),
-                    domain: vec!["project", "system", "tool"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A is owned/maintained by a person/org.",
+                &["project", "system", "tool"],
             ),
-            (
+            pred(
                 "authored_by",
-                PredicateDef {
-                    description: "A was authored by a person/org.".into(),
-                    domain: vec!["document", "claim", "evidence"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A was authored by a person/org.",
+                &["document", "claim", "evidence"],
             ),
-            (
+            pred(
                 "implements",
-                PredicateDef {
-                    description: "A implements a concept or spec.".into(),
-                    domain: vec!["system", "tool"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A implements a concept or spec.",
+                &["system", "tool"],
             ),
-            (
+            pred(
                 "derives_from",
-                PredicateDef {
-                    description: "A derives from evidence or documents.".into(),
-                    domain: vec!["claim", "document"]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                    inverse: None,
-                    symmetric: false,
-                    severity: SchemaSeverity::Warn,
-                },
+                "A derives from evidence or documents.",
+                &["claim", "document"],
             ),
         ]),
-    };
-
-    let vault = VaultSchema {
-        scope_resolution: ScopeResolution::MostSpecific,
-        unscoped: UnmatchedBehavior::Allow,
-        deny: Vec::new(),
-        scopes: vec![
-            scope_notes(
-                "kg",
-                "kg",
-                Some("Knowledge graph notes"),
-                true,
-                UnmatchedBehavior::Warn,
-            ),
-            scope_notes_typed("kg_concepts", "kg/concepts", true, "concept"),
-            scope_notes_typed("kg_entities", "kg/entities", true, "entity"),
-            scope_notes_typed("kg_people", "kg/people", true, "person"),
-            scope_notes_typed("kg_orgs", "kg/orgs", true, "org"),
-            scope_notes_typed("kg_projects", "kg/projects", true, "project"),
-            scope_notes_typed("kg_systems", "kg/systems", true, "system"),
-            scope_notes_typed("kg_tools", "kg/tools", true, "tool"),
-            scope_notes_typed("kg_documents", "kg/documents", true, "document"),
-            scope_notes_typed("kg_claims", "kg/claims", true, "claim"),
-            scope_notes_typed("kg_evidence", "kg/evidence", true, "evidence"),
-            scope_notes_typed("kg_tasks", "kg/tasks", true, "task"),
-            VaultScope {
-                id: "sources".into(),
-                path: "sources".into(),
-                required: true,
-                description: Some("Raw sources and references".into()),
-                unmatched_files: UnmatchedBehavior::Warn,
-                allow: vec![
-                    allow_glob("sources_md", "**/*.md"),
-                    allow_glob("sources_pdf", "**/*.pdf"),
-                    allow_glob("sources_html", "**/*.html"),
-                ],
-                deny: Vec::new(),
-                inherit_allow: false,
-                inherit_deny: false,
-                inherit_notes: false,
-                kinds: Vec::new(),
-                extensions: Vec::new(),
-                notes: None,
-                orphan_attachments: None,
-            },
-            scope_inherit("sources_papers", "sources/papers", true),
-            scope_inherit("sources_links", "sources/links", true),
-            scope_inherit("sources_notes", "sources/notes", true),
-            VaultScope {
-                id: "journal".into(),
-                path: "journal".into(),
-                required: true,
-                description: Some("Daily journal".into()),
-                unmatched_files: UnmatchedBehavior::Warn,
-                allow: vec![LayoutRule {
-                    id: "journal_weekly".into(),
-                    description: None,
-                    glob: None,
-                    regex: None,
-                    template: Some("{year}/{week}/{year}-{month}-{day}.md".into()),
-                    severity: SchemaSeverity::Warn,
-                }],
-                deny: Vec::new(),
-                inherit_allow: false,
-                inherit_deny: false,
-                inherit_notes: false,
-                kinds: Vec::new(),
-                extensions: Vec::new(),
-                notes: Some(oxidian::ScopeNotes {
-                    r#type: Some(oxidian::ScopeNoteType {
+        vault: VaultSchema {
+            scopes: scopes([
+                scope_notes(
+                    "kg",
+                    None,
+                    Some("Knowledge graph notes"),
+                    true,
+                    UnmatchedBehavior::Warn,
+                ),
+                scope_notes_typed("kg_concepts", "kg/concepts", true, "concept"),
+                scope_notes_typed("kg_entities", "kg/entities", true, "entity"),
+                scope_notes_typed("kg_people", "kg/people", true, "person"),
+                scope_notes_typed("kg_orgs", "kg/orgs", true, "org"),
+                scope_notes_typed("kg_projects", "kg/projects", true, "project"),
+                scope_notes_typed("kg_systems", "kg/systems", true, "system"),
+                scope_notes_typed("kg_tools", "kg/tools", true, "tool"),
+                scope_notes_typed("kg_documents", "kg/documents", true, "document"),
+                scope_notes_typed("kg_claims", "kg/claims", true, "claim"),
+                scope_notes_typed("kg_evidence", "kg/evidence", true, "evidence"),
+                scope_notes_typed("kg_tasks", "kg/tasks", true, "task"),
+                (
+                    "sources",
+                    ScopeDef {
                         required: true,
-                        allowed: vec!["journal".into()],
-                        severity: SchemaSeverity::Error,
-                    }),
-                    require_any: None,
-                }),
-                orphan_attachments: None,
-            },
-            VaultScope {
-                id: "inbox".into(),
-                path: "inbox".into(),
-                required: true,
-                description: Some("Capture".into()),
-                unmatched_files: UnmatchedBehavior::Allow,
-                allow: Vec::new(),
-                deny: Vec::new(),
-                inherit_allow: false,
-                inherit_deny: false,
-                inherit_notes: false,
-                kinds: Vec::new(),
-                extensions: Vec::new(),
-                notes: None,
-                orphan_attachments: None,
-            },
-        ],
-    };
-
-    Schema {
-        version: 1,
-        node,
-        predicates,
-        vault,
+                        description: Some("Raw sources and references".into()),
+                        allow: vec![
+                            LayoutRuleEntry::Glob("**/*.md".into()),
+                            LayoutRuleEntry::Glob("**/*.pdf".into()),
+                            LayoutRuleEntry::Glob("**/*.html".into()),
+                        ],
+                        ..ScopeDef::default()
+                    },
+                ),
+                scope_inherit("sources_papers", "sources/papers", true),
+                scope_inherit("sources_links", "sources/links", true),
+                scope_inherit("sources_notes", "sources/notes", true),
+                (
+                    "journal",
+                    ScopeDef {
+                        required: true,
+                        description: Some("Daily journal".into()),
+                        allow: vec![LayoutRuleEntry::Full(LayoutRule {
+                            description: None,
+                            glob: None,
+                            regex: None,
+                            template: Some("{year}/{week}/{year}-{month}-{day}.md".into()),
+                            severity: SchemaSeverity::Warn,
+                        })],
+                        notes: Some(oxidian::ScopeNotes {
+                            r#type: Some(oxidian::ScopeNoteType {
+                                required: true,
+                                allowed: vec!["journal".into()],
+                                severity: SchemaSeverity::Error,
+                            }),
+                            require_any: None,
+                        }),
+                        ..ScopeDef::default()
+                    },
+                ),
+                (
+                    "inbox",
+                    ScopeDef {
+                        required: true,
+                        description: Some("Capture".into()),
+                        unmatched: UnmatchedBehavior::Allow,
+                        ..ScopeDef::default()
+                    },
+                ),
+            ]),
+            ..VaultSchema::default()
+        },
     }
 }
 
 fn build_kg_memory_schema() -> Schema {
     let mut schema = build_kg_schema();
-    insert_node_type(
-        &mut schema.node,
+    insert_type(
+        &mut schema,
         "memory",
         "Memory entries (daily context, reflections).",
     );
-    insert_node_type(&mut schema.node, "event", "Memory event.");
-    insert_node_type(&mut schema.node, "quote", "Memory quote.");
-    insert_node_type(&mut schema.node, "decision", "Memory decision.");
-    insert_node_type(&mut schema.node, "fact", "Memory fact.");
-    insert_node_type(&mut schema.node, "preference", "Memory preference.");
+    insert_type(&mut schema, "event", "Memory event.");
+    insert_type(&mut schema, "quote", "Memory quote.");
+    insert_type(&mut schema, "decision", "Memory decision.");
+    insert_type(&mut schema, "fact", "Memory fact.");
+    insert_type(&mut schema, "preference", "Memory preference.");
 
-    schema.vault.scopes.push(VaultScope {
-        id: "memory".into(),
-        path: "memory".into(),
-        required: true,
-        description: Some("Memories".into()),
-        unmatched_files: UnmatchedBehavior::Error,
-        allow: vec![LayoutRule {
-            id: "memory_entry".into(),
-            description: None,
-            glob: None,
-            regex: None,
-            template: Some("{year}/{month}/{day}/{slug}.md".into()),
-            severity: SchemaSeverity::Error,
-        }],
-        deny: Vec::new(),
-        inherit_allow: false,
-        inherit_deny: false,
-        inherit_notes: false,
-        kinds: Vec::new(),
-        extensions: Vec::new(),
-        notes: Some(oxidian::ScopeNotes {
-            r#type: Some(oxidian::ScopeNoteType {
-                required: true,
-                allowed: vec![
-                    "memory".into(),
-                    "event".into(),
-                    "quote".into(),
-                    "decision".into(),
-                    "fact".into(),
-                    "preference".into(),
-                ],
-                severity: SchemaSeverity::Error,
-            }),
-            require_any: Some(oxidian::ScopeRequireAny {
-                tags: vec![
-                    "event".into(),
-                    "quote".into(),
-                    "decision".into(),
-                    "fact".into(),
-                    "preference".into(),
-                ],
-                types: vec![
-                    "event".into(),
-                    "quote".into(),
-                    "decision".into(),
-                    "fact".into(),
-                    "preference".into(),
-                ],
-                severity: SchemaSeverity::Error,
-            }),
-        }),
-        orphan_attachments: None,
-    });
+    let memory_types: Vec<String> = ["memory", "event", "quote", "decision", "fact", "preference"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let sub_types: Vec<String> = ["event", "quote", "decision", "fact", "preference"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
-    schema.vault.scopes.push(VaultScope {
-        id: "memory_assets".into(),
-        path: "memory/assets".into(),
-        required: true,
-        description: Some("Memory attachments".into()),
-        unmatched_files: UnmatchedBehavior::Warn,
-        allow: vec![allow_glob("memory_assets_any", "**/*")],
-        deny: Vec::new(),
-        inherit_allow: false,
-        inherit_deny: false,
-        inherit_notes: false,
-        kinds: vec![oxidian::ScopeKind::Attachment],
-        extensions: Vec::new(),
-        notes: None,
-        orphan_attachments: Some(SchemaSeverity::Warn),
-    });
+    schema.vault.scopes.insert(
+        "memory".into(),
+        ScopeDef {
+            required: true,
+            description: Some("Memories".into()),
+            unmatched: UnmatchedBehavior::Error,
+            allow: vec![LayoutRuleEntry::Full(LayoutRule {
+                template: Some("{year}/{month}/{day}/{slug}.md".into()),
+                severity: SchemaSeverity::Error,
+                ..LayoutRule::default()
+            })],
+            notes: Some(oxidian::ScopeNotes {
+                r#type: Some(oxidian::ScopeNoteType {
+                    required: true,
+                    allowed: memory_types,
+                    severity: SchemaSeverity::Error,
+                }),
+                require_any: Some(oxidian::ScopeRequireAny {
+                    tags: sub_types.clone(),
+                    types: sub_types,
+                    severity: SchemaSeverity::Error,
+                }),
+            }),
+            ..ScopeDef::default()
+        },
+    );
+
+    schema.vault.scopes.insert(
+        "memory_assets".into(),
+        ScopeDef {
+            path: Some("memory/assets".into()),
+            required: true,
+            description: Some("Memory attachments".into()),
+            allow: vec![LayoutRuleEntry::Glob("**/*".into())],
+            kinds: vec![oxidian::ScopeKind::Attachment],
+            orphans: Some(SchemaSeverity::Warn),
+            ..ScopeDef::default()
+        },
+    );
 
     schema
 }
 
-fn allow_glob(id: &str, glob: &str) -> LayoutRule {
-    LayoutRule {
-        id: id.to_string(),
-        description: None,
-        glob: Some(glob.to_string()),
-        regex: None,
-        template: None,
-        severity: SchemaSeverity::Warn,
+// ---------------------------------------------------------------------------
+// Template builder helpers
+// ---------------------------------------------------------------------------
+
+/// Builder for a `PredicateDef` to reduce template verbosity.
+struct PredBuilder {
+    name: &'static str,
+    def: PredicateDef,
+}
+
+impl PredBuilder {
+    fn severity(mut self, s: SchemaSeverity) -> Self {
+        self.def.severity = s;
+        self
+    }
+    fn symmetric(mut self) -> Self {
+        self.def.symmetric = true;
+        self
+    }
+    fn inverse(mut self, name: &str) -> Self {
+        self.def.inverse = Some(name.to_string());
+        self
     }
 }
 
-fn scope_notes(
-    id: &str,
-    path: &str,
-    description: Option<&str>,
-    required: bool,
-    unmatched_files: UnmatchedBehavior,
-) -> VaultScope {
-    VaultScope {
-        id: id.to_string(),
-        path: path.to_string(),
-        required,
-        description: description.map(str::to_string),
-        unmatched_files,
-        allow: vec![
-            allow_glob("notes_md", "**/*.md"),
-            allow_glob("notes_canvas", "**/*.canvas"),
-        ],
-        deny: Vec::new(),
-        inherit_allow: false,
-        inherit_deny: false,
-        inherit_notes: false,
-        kinds: Vec::new(),
-        extensions: Vec::new(),
-        notes: None,
-        orphan_attachments: None,
+fn pred(name: &'static str, description: &str, domain: &[&str]) -> PredBuilder {
+    PredBuilder {
+        name,
+        def: PredicateDef {
+            description: description.to_string(),
+            domain: domain.iter().map(|s| s.to_string()).collect(),
+            inverse: None,
+            symmetric: false,
+            severity: SchemaSeverity::Warn,
+        },
     }
 }
 
-fn scope_notes_typed(id: &str, path: &str, required: bool, note_type: &str) -> VaultScope {
-    VaultScope {
-        id: id.to_string(),
-        path: path.to_string(),
-        required,
-        description: None,
-        unmatched_files: UnmatchedBehavior::Warn,
-        allow: Vec::new(),
-        deny: Vec::new(),
-        inherit_allow: true,
-        inherit_deny: false,
-        inherit_notes: false,
-        kinds: Vec::new(),
-        extensions: Vec::new(),
-        notes: Some(oxidian::ScopeNotes {
-            r#type: Some(oxidian::ScopeNoteType {
-                required: true,
-                allowed: vec![note_type.to_string()],
-                severity: SchemaSeverity::Warn,
-            }),
-            require_any: None,
-        }),
-        orphan_attachments: None,
+fn map_preds<const N: usize>(items: [PredBuilder; N]) -> BTreeMap<String, PredicateDef> {
+    let mut out = BTreeMap::new();
+    for item in items {
+        out.insert(item.name.to_string(), item.def);
     }
-}
-
-fn scope_inherit(id: &str, path: &str, required: bool) -> VaultScope {
-    VaultScope {
-        id: id.to_string(),
-        path: path.to_string(),
-        required,
-        description: None,
-        unmatched_files: UnmatchedBehavior::Warn,
-        allow: Vec::new(),
-        deny: Vec::new(),
-        inherit_allow: true,
-        inherit_deny: false,
-        inherit_notes: false,
-        kinds: Vec::new(),
-        extensions: Vec::new(),
-        notes: None,
-        orphan_attachments: None,
-    }
-}
-
-fn insert_node_type(node: &mut NodeSchema, key: &str, doc: &str) {
-    if !node.types.iter().any(|t| t.eq_ignore_ascii_case(key)) {
-        node.types.push(key.to_string());
-    }
-    node.type_def
-        .docs
-        .entry(key.to_string())
-        .or_insert_with(|| doc.to_string());
+    out
 }
 
 fn map_str<const N: usize>(items: [(&str, &str); N]) -> BTreeMap<String, String> {
@@ -2325,12 +2038,79 @@ fn map_str<const N: usize>(items: [(&str, &str); N]) -> BTreeMap<String, String>
     out
 }
 
-fn map_defs<const N: usize>(items: [(&str, PredicateDef); N]) -> BTreeMap<String, PredicateDef> {
-    let mut out: BTreeMap<String, PredicateDef> = BTreeMap::new();
-    for (k, v) in items {
-        out.insert(k.to_string(), v);
+fn scopes<const N: usize>(items: [(&str, ScopeDef); N]) -> BTreeMap<String, ScopeDef> {
+    let mut out = BTreeMap::new();
+    for (id, scope) in items {
+        out.insert(id.to_string(), scope);
     }
     out
+}
+
+fn scope_notes<'a>(
+    id: &'a str,
+    path: Option<&str>,
+    description: Option<&str>,
+    required: bool,
+    unmatched: UnmatchedBehavior,
+) -> (&'a str, ScopeDef) {
+    (
+        id,
+        ScopeDef {
+            path: path.map(str::to_string),
+            required,
+            description: description.map(str::to_string),
+            unmatched,
+            allow: vec![
+                LayoutRuleEntry::Glob("**/*.md".into()),
+                LayoutRuleEntry::Glob("**/*.canvas".into()),
+            ],
+            ..ScopeDef::default()
+        },
+    )
+}
+
+fn scope_notes_typed<'a>(
+    id: &'a str,
+    path: &str,
+    required: bool,
+    note_type: &str,
+) -> (&'a str, ScopeDef) {
+    (
+        id,
+        ScopeDef {
+            path: Some(path.to_string()),
+            required,
+            inherit: vec![InheritKind::Allow],
+            notes: Some(oxidian::ScopeNotes {
+                r#type: Some(oxidian::ScopeNoteType {
+                    required: true,
+                    allowed: vec![note_type.to_string()],
+                    severity: SchemaSeverity::Warn,
+                }),
+                require_any: None,
+            }),
+            ..ScopeDef::default()
+        },
+    )
+}
+
+fn scope_inherit<'a>(id: &'a str, path: &str, required: bool) -> (&'a str, ScopeDef) {
+    (
+        id,
+        ScopeDef {
+            path: Some(path.to_string()),
+            required,
+            inherit: vec![InheritKind::Allow],
+            ..ScopeDef::default()
+        },
+    )
+}
+
+fn insert_type(schema: &mut Schema, key: &str, description: &str) {
+    schema
+        .types
+        .entry(key.to_string())
+        .or_insert_with(|| description.to_string());
 }
 
 #[cfg(test)]
@@ -2341,10 +2121,9 @@ mod tests {
     fn para_template_contains_sections() {
         let tpl = generate_schema_template(SchemaTemplate::Para);
         let text = toml::to_string_pretty(&tpl).expect("serialize schema");
-        assert!(text.contains("[node]"));
-        assert!(text.contains("[predicates.aliases]"));
-        assert!(text.contains("[vault]"));
-        assert!(text.contains("[[vault.scopes]]"));
+        assert!(text.contains("[types]"));
+        assert!(text.contains("[aliases]"));
+        assert!(text.contains("[vault.scopes.projects]"));
         assert!(text.contains("projects"));
     }
 
@@ -2352,11 +2131,9 @@ mod tests {
     fn kg_template_contains_sections() {
         let tpl = generate_schema_template(SchemaTemplate::Kg);
         let text = toml::to_string_pretty(&tpl).expect("serialize schema");
-        assert!(text.contains("[node]"));
-        assert!(text.contains("[predicates.aliases]"));
-        assert!(text.contains("[vault]"));
-        assert!(text.contains("[[vault.scopes]]"));
-        assert!(text.contains("kg"));
+        assert!(text.contains("[types]"));
+        assert!(text.contains("[aliases]"));
+        assert!(text.contains("[vault.scopes.kg]"));
         assert!(text.contains("journal"));
     }
 
@@ -2364,11 +2141,9 @@ mod tests {
     fn kg_memory_template_contains_sections() {
         let tpl = generate_schema_template(SchemaTemplate::KgMemory);
         let text = toml::to_string_pretty(&tpl).expect("serialize schema");
-        assert!(text.contains("[node]"));
-        assert!(text.contains("[predicates.aliases]"));
-        assert!(text.contains("[vault]"));
-        assert!(text.contains("[[vault.scopes]]"));
-        assert!(text.contains("memory"));
+        assert!(text.contains("[types]"));
+        assert!(text.contains("[aliases]"));
+        assert!(text.contains("[vault.scopes.memory]"));
         assert!(text.contains("{year}/{month}/{day}/{slug}.md"));
     }
 }

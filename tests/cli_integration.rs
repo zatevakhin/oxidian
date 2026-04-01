@@ -2,10 +2,11 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 
 fn cmd() -> Command {
-    Command::cargo_bin("oxi").expect("binary exists")
+    cargo_bin_cmd!("oxi")
 }
 
 fn create_vault(root: &Path) {
@@ -616,29 +617,17 @@ fn check_schema_text_explains_slug_mismatch() {
         vault.join(".obsidian/oxidian/schema.toml"),
         r#"version = 1
 
-[node]
-types = ["memory"]
-
-[node.type.docs]
+[types]
 memory = "Memory entry"
 
-[predicates.aliases]
-
 [vault]
-scope_resolution = "most_specific"
-unscoped = "allow"
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{ template = "{year}/{month}/{day}/{slug}.md" }]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{year}/{month}/{day}/{slug}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory"]
 severity = "error"
@@ -671,29 +660,17 @@ fn check_schema_json_uses_simple_template_message() {
         vault.join(".obsidian/oxidian/schema.toml"),
         r#"version = 1
 
-[node]
-types = ["memory"]
-
-[node.type.docs]
+[types]
 memory = "Memory entry"
 
-[predicates.aliases]
-
 [vault]
-scope_resolution = "most_specific"
-unscoped = "allow"
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{ template = "{year}/{month}/{day}/{slug}.md" }]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{year}/{month}/{day}/{slug}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory"]
 severity = "error"

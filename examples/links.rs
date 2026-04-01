@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         let occs = note
             .link_occurrences
             .iter()
-            .filter(|l| kind_filter.as_ref().map_or(true, |k| &l.kind == k))
+            .filter(|l| kind_filter.as_ref().is_none_or(|k| &l.kind == k))
             .filter(|l| !args.only_embeds || l.embed);
 
         println!("\noccurrences:");

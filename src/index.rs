@@ -371,8 +371,8 @@ impl VaultIndex {
             let has_orphan_rules = schema
                 .vault
                 .scopes
-                .iter()
-                .any(|scope| scope.orphan_attachments.is_some());
+                .values()
+                .any(|scope| scope.orphans.is_some());
             if has_orphan_rules {
                 let resolver = self.link_resolver();
                 let mut referenced = HashSet::new();
@@ -392,10 +392,10 @@ impl VaultIndex {
                     if file.kind != FileKind::Attachment {
                         continue;
                     }
-                    let Some(scope) = schema.scope_for_path(&file.path) else {
+                    let Some((scope_id, scope)) = schema.scope_for_path(&file.path) else {
                         continue;
                     };
-                    let Some(severity) = scope.orphan_attachments.clone() else {
+                    let Some(severity) = scope.orphans.clone() else {
                         continue;
                     };
                     if referenced.contains(&file.path) {
@@ -410,8 +410,7 @@ impl VaultIndex {
                                 "attachment '{}' has no inbound links",
                                 file.path.as_str_lossy()
                             ),
-                            scope_id: Some(scope.id.clone()),
-                            rule_id: None,
+                            scope: Some(scope_id.to_string()),
                             detail: None,
                         },
                     });

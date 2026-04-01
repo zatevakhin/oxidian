@@ -18,8 +18,10 @@ async fn fuzzy_search_filenames_and_content_work() -> anyhow::Result<()> {
         "this line contains strawberry jam\n",
     )?;
 
-    let mut cfg = VaultConfig::default();
-    cfg.watch_debounce = Duration::from_millis(50);
+    let cfg = VaultConfig {
+        watch_debounce: Duration::from_millis(50),
+        ..Default::default()
+    };
     let vault = Vault::with_config(&vault_root, cfg)?;
     let service = VaultService::new(vault)?;
     service.build_index().await?;

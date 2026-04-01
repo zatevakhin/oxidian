@@ -16,8 +16,10 @@ async fn vault_service_indexes_and_reindexes_on_change() -> anyhow::Result<()> {
         "---\ntags: [Foo]\n---\n\n# A\nBody #bar and [[Link]].\n",
     )?;
 
-    let mut cfg = VaultConfig::default();
-    cfg.watch_debounce = Duration::from_millis(100);
+    let cfg = VaultConfig {
+        watch_debounce: Duration::from_millis(100),
+        ..Default::default()
+    };
     let vault = Vault::with_config(&vault_root, cfg)?;
 
     let mut service = VaultService::new(vault)?;

@@ -20,10 +20,7 @@ fn base_schema() -> String {
     r#"
 version = 1
 
-[node]
-types = ["concept", "journal", "memory", "event", "quote", "decision", "fact", "preference"]
-
-[node.type.docs]
+[types]
 concept = "Concepts"
 journal = "Journal entries"
 memory = "Memory entries"
@@ -33,7 +30,7 @@ decision = "Memory decision"
 fact = "Memory fact"
 preference = "Memory preference"
 
-[predicates.aliases]
+[aliases]
 requires = "depends_on"
 
 [predicates.depends_on]
@@ -42,8 +39,6 @@ domain = ["concept"]
 severity = "error"
 
 [vault]
-scope_resolution = "most_specific"
-unscoped = "allow"
 "#
     .to_string()
 }
@@ -55,15 +50,13 @@ fn scope_unmatched_is_reported() {
     fs::create_dir_all(&root).expect("create vault");
 
     let schema = format!(
-        "{}\n\n[[vault.scopes]]\n\
-         id = \"people\"\n\
-         path = \"people\"\n\
-         required = true\n\
-         unmatched_files = \"warn\"\n\
-         \n\
-         [[vault.scopes.allow]]\n\
-         id = \"people_md\"\n\
-         glob = \"**/*.md\"\n",
+        r#"{}
+
+[vault.scopes.people]
+required = true
+unmatched = "warn"
+allow = ["**/*.md"]
+"#,
         base_schema()
     );
 
@@ -90,20 +83,14 @@ fn deny_rule_is_reported() {
     fs::create_dir_all(&root).expect("create vault");
 
     let schema = format!(
-        "{}\n\n[[vault.scopes]]\n\
-         id = \"projects\"\n\
-         path = \"projects\"\n\
-         required = true\n\
-         unmatched_files = \"warn\"\n\
-         \n\
-         [[vault.scopes.allow]]\n\
-         id = \"projects_md\"\n\
-         glob = \"**/*.md\"\n\
-         \n\
-         [[vault.scopes.deny]]\n\
-         id = \"blocked\"\n\
-         glob = \"secret.md\"\n\
-         severity = \"error\"\n",
+        r#"{}
+
+[vault.scopes.projects]
+required = true
+unmatched = "warn"
+allow = ["**/*.md"]
+deny = [{{ glob = "secret.md", severity = "error" }}]
+"#,
         base_schema()
     );
 
@@ -115,11 +102,14 @@ fn deny_rule_is_reported() {
     let report = index.schema_report();
 
     assert!(report.errors > 0);
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|v| v.violation.code == "layout_denied")
+    let violation = report
+        .violations
+        .iter()
+        .find(|v| v.violation.code == "layout_denied")
+        .expect("deny violation");
+    assert_eq!(
+        violation.violation.message,
+        "path 'projects/secret.md' matched a deny rule"
     );
 }
 
@@ -130,22 +120,19 @@ fn inherit_allow_applies_to_nested_scope() {
     fs::create_dir_all(&root).expect("create vault");
 
     let schema = format!(
-        "{}\n\n[[vault.scopes]]\n\
-         id = \"kg\"\n\
-         path = \"kg\"\n\
-         required = true\n\
-         unmatched_files = \"warn\"\n\
-         \n\
-         [[vault.scopes.allow]]\n\
-         id = \"kg_md\"\n\
-         glob = \"**/*.md\"\n\
-         \n\
-         [[vault.scopes]]\n\
-         id = \"kg_concepts\"\n\
-         path = \"kg/concepts\"\n\
-         required = true\n\
-         inherit_allow = true\n\
-         unmatched_files = \"error\"\n",
+        r#"{}
+
+[vault.scopes.kg]
+required = true
+unmatched = "warn"
+allow = ["**/*.md"]
+
+[vault.scopes.kg_concepts]
+path = "kg/concepts"
+required = true
+inherit = ["allow"]
+unmatched = "error"
+"#,
         base_schema()
     );
 
@@ -168,15 +155,10 @@ fn template_match_enforces_repeated_vars() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "journal"
-path = "journal"
+[vault.scopes.journal]
 required = true
-unmatched_files = "error"
-
-[[vault.scopes.allow]]
-id = "journal_entry"
-template = "{{year}}/{{year}}-{{month}}-{{day}}.md"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{year}}-{{month}}-{{day}}.md" }}]
 "#,
         base_schema()
     );
@@ -210,15 +192,10 @@ fn old_template_format_syntax_is_rejected() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "journal"
-path = "journal"
+[vault.scopes.journal]
 required = true
-unmatched_files = "error"
-
-[[vault.scopes.allow]]
-id = "journal_entry"
-template = "{{year:yyyy}}/{{month}}/{{day}}.md"
+unmatched = "error"
+allow = [{{ template = "{{year:yyyy}}/{{month}}/{{day}}.md" }}]
 "#,
         base_schema()
     );
@@ -245,20 +222,18 @@ fn scope_note_type_is_required() {
     fs::create_dir_all(&root).expect("create vault");
 
     let schema = format!(
-        "{}\n\n[[vault.scopes]]\n\
-         id = \"journal\"\n\
-         path = \"journal\"\n\
-         required = true\n\
-         unmatched_files = \"warn\"\n\
-         \n\
-         [[vault.scopes.allow]]\n\
-         id = \"journal_entry\"\n\
-         glob = \"**/*.md\"\n\
-         \n\
-         [vault.scopes.notes.type]\n\
-         required = true\n\
-         allowed = [\"journal\"]\n\
-         severity = \"error\"\n",
+        r#"{}
+
+[vault.scopes.journal]
+required = true
+unmatched = "warn"
+allow = ["**/*.md"]
+
+[vault.scopes.journal.notes.type]
+required = true
+allowed = ["journal"]
+severity = "error"
+"#,
         base_schema()
     );
 
@@ -287,17 +262,12 @@ fn memory_scope_requires_date_structure() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{month}}/{{day}}/{{slug}}.md" }}]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory", "event", "quote", "decision", "fact", "preference"]
 severity = "error"
@@ -334,17 +304,12 @@ fn memory_scope_requires_type() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{month}}/{{day}}/{{slug}}.md" }}]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory", "event", "quote", "decision", "fact", "preference"]
 severity = "error"
@@ -377,17 +342,12 @@ fn memory_scope_rejects_disallowed_type() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{month}}/{{day}}/{{slug}}.md" }}]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory", "event", "quote", "decision", "fact", "preference"]
 severity = "error"
@@ -427,17 +387,12 @@ fn memory_scope_requires_slug_format() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{month}}/{{day}}/{{slug}}.md" }}]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory"]
 severity = "error"
@@ -481,17 +436,12 @@ fn memory_scope_requires_zero_padded_day() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{month}}/{{day}}/{{slug}}.md" }}]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory"]
 severity = "error"
@@ -535,22 +485,17 @@ fn memory_scope_requires_tag_or_type_match() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{month}}/{{day}}/{{slug}}.md" }}]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory", "event", "quote", "decision", "fact", "preference"]
 severity = "error"
 
-[vault.scopes.notes.require_any]
+[vault.scopes.memory.notes.require_any]
 tags = ["event", "quote", "decision", "fact", "preference"]
 types = ["event", "quote", "decision", "fact", "preference"]
 severity = "error"
@@ -590,22 +535,17 @@ fn memory_scope_accepts_tag_match() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory"
-path = "memory"
+[vault.scopes.memory]
 required = true
-unmatched_files = "error"
+unmatched = "error"
+allow = [{{ template = "{{year}}/{{month}}/{{day}}/{{slug}}.md" }}]
 
-[[vault.scopes.allow]]
-id = "memory_entry"
-template = "{{year}}/{{month}}/{{day}}/{{slug}}.md"
-
-[vault.scopes.notes.type]
+[vault.scopes.memory.notes.type]
 required = true
 allowed = ["memory", "event", "quote", "decision", "fact", "preference"]
 severity = "error"
 
-[vault.scopes.notes.require_any]
+[vault.scopes.memory.notes.require_any]
 tags = ["event", "quote", "decision", "fact", "preference"]
 types = ["event", "quote", "decision", "fact", "preference"]
 severity = "error"
@@ -646,17 +586,13 @@ fn orphaned_attachment_is_reported() {
     let schema = format!(
         r#"{}
 
-[[vault.scopes]]
-id = "memory_assets"
+[vault.scopes.memory_assets]
 path = "memory/assets"
 required = true
-unmatched_files = "warn"
+unmatched = "warn"
 kinds = ["attachment"]
-orphan_attachments = "warn"
-
-[[vault.scopes.allow]]
-id = "assets_any"
-glob = "**/*"
+orphans = "warn"
+allow = ["**/*"]
 "#,
         base_schema()
     );
@@ -684,15 +620,13 @@ fn required_scope_dir_is_reported() {
     fs::create_dir_all(&root).expect("create vault");
 
     let schema = format!(
-        "{}\n\n[[vault.scopes]]\n\
-         id = \"people\"\n\
-         path = \"people\"\n\
-         required = true\n\
-         unmatched_files = \"warn\"\n\
-         \n\
-         [[vault.scopes.allow]]\n\
-         id = \"people_md\"\n\
-         glob = \"**/*.md\"\n",
+        r#"{}
+
+[vault.scopes.people]
+required = true
+unmatched = "warn"
+allow = ["**/*.md"]
+"#,
         base_schema()
     );
 
@@ -729,11 +663,12 @@ fn invalid_node_type_is_reported() {
     fs::create_dir_all(&root).expect("create vault");
 
     let schema = format!(
-        "{}\n\n[[vault.scopes]]\n\
-         id = \"notes\"\n\
-         path = \"notes\"\n\
-         required = true\n\
-         unmatched_files = \"allow\"\n",
+        r#"{}
+
+[vault.scopes.notes]
+required = true
+unmatched = "allow"
+"#,
         base_schema()
     );
     write_schema(&root, &schema);
@@ -768,11 +703,12 @@ fn unknown_predicate_link_is_reported_as_warning() {
     fs::create_dir_all(&root).expect("create vault");
 
     let schema = format!(
-        "{}\n\n[[vault.scopes]]\n\
-         id = \"notes\"\n\
-         path = \"notes\"\n\
-         required = true\n\
-         unmatched_files = \"allow\"\n",
+        r#"{}
+
+[vault.scopes.notes]
+required = true
+unmatched = "allow"
+"#,
         base_schema()
     );
     write_schema(&root, &schema);
@@ -799,10 +735,9 @@ fn unknown_predicate_link_is_reported_as_warning() {
             .any(|v| v.violation.code == "predicate_unknown")
     );
     assert!(
-        report
+        !report
             .violations
             .iter()
             .any(|v| v.violation.code == "predicate_domain")
-            == false
     );
 }

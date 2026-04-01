@@ -604,6 +604,22 @@ fn rank_cause(cause: &ReindexCause) -> u8 {
     }
 }
 
+fn to_vault_path(vault: &Vault, abs: &Path) -> Option<VaultPath> {
+    vault.to_rel(abs).ok()
+}
+
+impl VaultService {
+    fn schema_state_for_rebuild(&self) -> SchemaState {
+        self.with_index(|idx| match idx.schema_status() {
+            SchemaStatus::Loaded {
+                source: SchemaSource::Inline,
+                ..
+            } => idx.schema_state(),
+            _ => SchemaState::load(self.vault()),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,21 +672,5 @@ mod tests {
 
         let out = apply_events(&vault, &lock, vec![ev]).unwrap();
         assert!(out.is_empty());
-    }
-}
-
-fn to_vault_path(vault: &Vault, abs: &Path) -> Option<VaultPath> {
-    vault.to_rel(abs).ok()
-}
-
-impl VaultService {
-    fn schema_state_for_rebuild(&self) -> SchemaState {
-        self.with_index(|idx| match idx.schema_status() {
-            SchemaStatus::Loaded {
-                source: SchemaSource::Inline,
-                ..
-            } => idx.schema_state(),
-            _ => SchemaState::load(self.vault()),
-        })
     }
 }

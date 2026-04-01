@@ -41,8 +41,7 @@ pub struct SchemaViolation {
     pub severity: SchemaSeverity,
     pub code: String,
     pub message: String,
-    pub scope_id: Option<String>,
-    pub rule_id: Option<String>,
+    pub scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<SchemaViolationDetail>,
 }
@@ -149,144 +148,193 @@ impl SchemaState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Schema structs (TOML format v1)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Schema {
     pub version: u32,
-    pub node: NodeSchema,
-    pub predicates: PredicatesSchema,
-    pub vault: VaultSchema,
-}
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct NodeSchema {
-    pub types: Vec<String>,
-    #[serde(rename = "type")]
-    pub type_def: NodeTypeSchema,
-}
+    /// Node types: key = type name, value = description.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub types: BTreeMap<String, String>,
 
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
-pub struct NodeTypeSchema {
-    #[serde(default)]
-    pub docs: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct PredicatesSchema {
-    #[serde(default)]
+    /// Predicate aliases: key = alias, value = canonical predicate name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, String>,
-    #[serde(flatten)]
-    pub defs: BTreeMap<String, PredicateDef>,
+
+    /// Predicate definitions: key = canonical name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub predicates: BTreeMap<String, PredicateDef>,
+
+    #[serde(default)]
+    pub vault: VaultSchema,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PredicateDef {
     pub description: String,
     pub domain: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverse: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub symmetric: bool,
-    #[serde(default = "default_severity")]
+    #[serde(
+        default = "default_severity",
+        skip_serializing_if = "is_default_severity"
+    )]
     pub severity: SchemaSeverity,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct VaultSchema {
-    #[serde(default = "default_scope_resolution")]
-    pub scope_resolution: ScopeResolution,
-    #[serde(default = "default_unscoped")]
+    #[serde(
+        default = "default_scope_resolution",
+        skip_serializing_if = "is_default_resolve"
+    )]
+    pub resolve: ScopeResolution,
+    #[serde(
+        default = "default_unscoped",
+        skip_serializing_if = "is_default_unscoped"
+    )]
     pub unscoped: UnmatchedBehavior,
-    #[serde(default)]
-    pub deny: Vec<LayoutRule>,
-    #[serde(default)]
-    pub scopes: Vec<VaultScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<LayoutRuleEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scopes: BTreeMap<String, ScopeDef>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct VaultScope {
-    pub id: String,
-    pub path: String,
-    #[serde(default)]
+pub struct ScopeDef {
+    /// Vault-relative path. Defaults to the scope's map key when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default = "default_unmatched")]
-    pub unmatched_files: UnmatchedBehavior,
-    #[serde(default)]
-    pub allow: Vec<LayoutRule>,
-    #[serde(default)]
-    pub deny: Vec<LayoutRule>,
-    #[serde(default)]
-    pub inherit_allow: bool,
-    #[serde(default)]
-    pub inherit_deny: bool,
-    #[serde(default)]
-    pub inherit_notes: bool,
-    #[serde(default)]
+    #[serde(
+        default = "default_unmatched",
+        skip_serializing_if = "is_default_unmatched"
+    )]
+    pub unmatched: UnmatchedBehavior,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<LayoutRuleEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<LayoutRuleEntry>,
+    /// Which parent-scope properties to inherit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherit: Vec<InheritKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<ScopeKind>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<ScopeNotes>,
-    #[serde(default)]
-    pub orphan_attachments: Option<SchemaSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphans: Option<SchemaSeverity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InheritKind {
+    Allow,
+    Deny,
+    Notes,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ScopeNotes {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<ScopeNoteType>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_any: Option<ScopeRequireAny>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ScopeRequireAny {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub types: Vec<String>,
-    #[serde(default = "default_severity")]
+    #[serde(
+        default = "default_severity",
+        skip_serializing_if = "is_default_severity"
+    )]
     pub severity: SchemaSeverity,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ScopeNoteType {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed: Vec<String>,
-    #[serde(default = "default_severity")]
+    #[serde(
+        default = "default_severity",
+        skip_serializing_if = "is_default_severity"
+    )]
     pub severity: SchemaSeverity,
+}
+
+/// A layout rule entry: either a simple glob string or a full rule object.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum LayoutRuleEntry {
+    /// Shorthand: a plain string interpreted as a glob pattern.
+    Glob(String),
+    /// Full rule with pattern and severity.
+    Full(LayoutRule),
+}
+
+impl LayoutRuleEntry {
+    /// Convert to a resolved `LayoutRule`.
+    pub fn as_rule(&self) -> LayoutRule {
+        match self {
+            LayoutRuleEntry::Glob(glob) => LayoutRule {
+                description: None,
+                glob: Some(glob.clone()),
+                regex: None,
+                template: None,
+                severity: default_severity(),
+            },
+            LayoutRuleEntry::Full(rule) => rule.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LayoutRule {
-    pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regex: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    #[serde(default = "default_severity")]
+    #[serde(
+        default = "default_severity",
+        skip_serializing_if = "is_default_severity"
+    )]
     pub severity: SchemaSeverity,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UnmatchedBehavior {
+    #[default]
     Allow,
     Warn,
     Error,
     Ignore,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeResolution {
+    #[default]
     MostSpecific,
 }
 
@@ -298,12 +346,72 @@ pub enum ScopeKind {
     Other,
 }
 
+// ---------------------------------------------------------------------------
+// skip_serializing_if helpers
+// ---------------------------------------------------------------------------
+
+impl Default for ScopeDef {
+    fn default() -> Self {
+        Self {
+            path: None,
+            required: false,
+            description: None,
+            unmatched: default_unmatched(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            inherit: Vec::new(),
+            kinds: Vec::new(),
+            extensions: Vec::new(),
+            notes: None,
+            orphans: None,
+        }
+    }
+}
+
+impl Default for LayoutRule {
+    fn default() -> Self {
+        Self {
+            description: None,
+            glob: None,
+            regex: None,
+            template: None,
+            severity: default_severity(),
+        }
+    }
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
+}
+
+fn is_default_severity(v: &SchemaSeverity) -> bool {
+    *v == SchemaSeverity::Warn
+}
+
+fn is_default_resolve(v: &ScopeResolution) -> bool {
+    *v == ScopeResolution::MostSpecific
+}
+
+fn is_default_unscoped(v: &UnmatchedBehavior) -> bool {
+    *v == UnmatchedBehavior::Allow
+}
+
+fn is_default_unmatched(v: &UnmatchedBehavior) -> bool {
+    *v == UnmatchedBehavior::Warn
+}
+
 impl Schema {
     pub fn from_toml_str(input: &str) -> Result<Self> {
         let schema: Schema =
             toml::from_str(input).map_err(|err| Error::SchemaToml(err.to_string()))?;
         schema.validate()?;
         Ok(schema)
+    }
+
+    /// Resolve the effective path for a scope. Falls back to the scope id
+    /// (the map key) when no explicit `path` is set.
+    pub fn resolved_scope_path<'a>(&self, id: &'a str, scope: &'a ScopeDef) -> &'a str {
+        scope.path.as_deref().unwrap_or(id)
     }
 
     pub fn validate_note(
@@ -327,9 +435,15 @@ impl Schema {
         let rel_str = path_to_rel_string(rel.as_path());
         let mut out = Vec::new();
 
-        for rule in &self.vault.deny {
-            if rule_matches(rule, &rel_str) {
-                out.push(layout_rule_violation("layout_denied", &rel_str, rule, None));
+        for entry in &self.vault.deny {
+            let rule = entry.as_rule();
+            if rule_matches(&rule, &rel_str) {
+                out.push(layout_rule_violation(
+                    "layout_denied",
+                    &rel_str,
+                    None,
+                    rule.severity,
+                ));
             }
         }
 
@@ -340,38 +454,37 @@ impl Schema {
                     severity,
                     code: "layout_unscoped".to_string(),
                     message: format!("path '{rel_str}' is outside configured scopes"),
-                    scope_id: None,
-                    rule_id: None,
+                    scope: None,
                     detail: None,
                 });
             }
             return out;
         };
 
+        let scope_id_str = selection.scope_id;
+        let scope_path = selection.scope_path.clone();
         let scope = selection.scope;
-        let scope_id = Some(scope.id.clone());
-        let rel_within = strip_scope_prefix(&rel_str, &scope.path);
+        let rel_within = strip_scope_prefix(&rel_str, &scope_path);
 
         let deny_rules = selection.collect_deny();
-        for rule in deny_rules {
+        for rule in &deny_rules {
             if rule_matches(rule, &rel_within) {
                 out.push(layout_rule_violation(
                     "layout_denied",
                     &rel_str,
-                    rule,
-                    Some(scope.id.clone()),
+                    Some(scope_id_str.to_string()),
+                    rule.severity.clone(),
                 ));
             }
         }
 
         if !scope.allows_kind(vault, rel.as_path()) {
-            if let Some(severity) = scope.unmatched_files.as_severity() {
+            if let Some(severity) = scope.unmatched.as_severity() {
                 out.push(SchemaViolation {
                     severity,
                     code: "layout_unmatched".to_string(),
-                    message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
-                    scope_id,
-                    rule_id: None,
+                    message: format!("path '{rel_str}' is not allowed by scope '{scope_id_str}'"),
+                    scope: Some(scope_id_str.to_string()),
                     detail: None,
                 });
             }
@@ -379,13 +492,12 @@ impl Schema {
         }
 
         if !scope.allows_extension(rel.as_path()) {
-            if let Some(severity) = scope.unmatched_files.as_severity() {
+            if let Some(severity) = scope.unmatched.as_severity() {
                 out.push(SchemaViolation {
                     severity,
                     code: "layout_unmatched".to_string(),
-                    message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
-                    scope_id,
-                    rule_id: None,
+                    message: format!("path '{rel_str}' is not allowed by scope '{scope_id_str}'"),
+                    scope: Some(scope_id_str.to_string()),
                     detail: None,
                 });
             }
@@ -412,23 +524,23 @@ impl Schema {
                 }
             }
 
-            if !allowed && let Some(severity) = scope.unmatched_files.as_severity() {
-                if let Some((rule, message)) = template_mismatch {
+            if !allowed && let Some(severity) = scope.unmatched.as_severity() {
+                if let Some((_, message)) = template_mismatch {
                     out.push(SchemaViolation {
                         severity,
                         code: "layout_template_mismatch".to_string(),
                         message,
-                        scope_id: Some(scope.id.clone()),
-                        rule_id: Some(rule.id.clone()),
+                        scope: Some(scope_id_str.to_string()),
                         detail: None,
                     });
                 } else {
                     out.push(SchemaViolation {
                         severity,
                         code: "layout_unmatched".to_string(),
-                        message: format!("path '{rel_str}' is not allowed by scope '{}'", scope.id),
-                        scope_id: Some(scope.id.clone()),
-                        rule_id: None,
+                        message: format!(
+                            "path '{rel_str}' is not allowed by scope '{scope_id_str}'"
+                        ),
+                        scope: Some(scope_id_str.to_string()),
                         detail: None,
                     });
                 }
@@ -440,20 +552,20 @@ impl Schema {
 
     pub fn validate_vault_layout(&self, vault: &Vault) -> Vec<SchemaViolationRecord> {
         let mut out = Vec::new();
-        for scope in &self.vault.scopes {
+        for (id, scope) in &self.vault.scopes {
             if !scope.required {
                 continue;
             }
-            let rel = Path::new(&scope.path);
+            let scope_path = self.resolved_scope_path(id, scope);
+            let rel = Path::new(scope_path);
             let Ok(rel) = VaultPath::try_from(rel) else {
                 out.push(SchemaViolationRecord {
                     path: None,
                     violation: SchemaViolation {
                         severity: SchemaSeverity::Error,
                         code: "layout_dir_invalid".to_string(),
-                        message: format!("required scope '{}' has invalid path", scope.path),
-                        scope_id: Some(scope.id.clone()),
-                        rule_id: None,
+                        message: format!("required scope '{id}' has invalid path"),
+                        scope: Some(id.clone()),
                         detail: None,
                     },
                 });
@@ -466,9 +578,8 @@ impl Schema {
                     violation: SchemaViolation {
                         severity: SchemaSeverity::Error,
                         code: "layout_dir_missing".to_string(),
-                        message: format!("required scope '{}' is missing", scope.path),
-                        scope_id: Some(scope.id.clone()),
-                        rule_id: None,
+                        message: format!("required scope '{id}' is missing"),
+                        scope: Some(id.clone()),
                         detail: None,
                     },
                 });
@@ -478,27 +589,29 @@ impl Schema {
     }
 
     fn validate(&self) -> Result<()> {
-        let mut scope_ids = HashSet::new();
-        for scope in &self.vault.scopes {
-            if scope.id.trim().is_empty() {
+        let mut scope_paths: HashMap<String, &str> = HashMap::new();
+        for (id, scope) in &self.vault.scopes {
+            if id.trim().is_empty() {
                 return Err(Error::SchemaToml("scope id must not be empty".to_string()));
             }
-            if !scope_ids.insert(scope.id.to_string()) {
+            let scope_path = self.resolved_scope_path(id, scope);
+            if scope_path.trim().is_empty() {
+                return Err(Error::SchemaToml(format!("scope '{id}' has empty path")));
+            }
+            let normalized = normalized_path(scope_path);
+            if let Some(existing) = scope_paths.insert(normalized.clone(), id.as_str()) {
                 return Err(Error::SchemaToml(format!(
-                    "scope id '{}' is duplicated",
-                    scope.id
+                    "scope '{id}' resolved path '{normalized}' is duplicated by scope '{existing}'"
                 )));
             }
-            if scope.path.trim().is_empty() {
-                return Err(Error::SchemaToml(format!(
-                    "scope '{}' has empty path",
-                    scope.id
-                )));
-            }
-            validate_rules(&scope.allow, "allow", Some(scope.id.as_str()))?;
-            validate_rules(&scope.deny, "deny", Some(scope.id.as_str()))?;
+            let allow_rules: Vec<LayoutRule> = scope.allow.iter().map(|e| e.as_rule()).collect();
+            let deny_rules: Vec<LayoutRule> = scope.deny.iter().map(|e| e.as_rule()).collect();
+            validate_rules(&allow_rules, "allow", Some(id.as_str()))?;
+            validate_rules(&deny_rules, "deny", Some(id.as_str()))?;
         }
-        validate_rules(&self.vault.deny, "deny", None)?;
+        let vault_deny_rules: Vec<LayoutRule> =
+            self.vault.deny.iter().map(|e| e.as_rule()).collect();
+        validate_rules(&vault_deny_rules, "deny", None)?;
         Ok(())
     }
 
@@ -508,12 +621,11 @@ impl Schema {
             return out;
         };
 
-        let allowed: Vec<String> = self
-            .node
-            .types
-            .iter()
-            .map(|t| t.to_ascii_lowercase())
-            .collect();
+        if self.types.is_empty() {
+            return out;
+        }
+
+        let allowed: Vec<String> = self.types.keys().map(|t| t.to_ascii_lowercase()).collect();
 
         let mut types = Vec::new();
         match value {
@@ -536,8 +648,7 @@ impl Schema {
                     severity: SchemaSeverity::Warn,
                     code: "node_type_invalid".to_string(),
                     message: "frontmatter 'type' must be a string or list of strings".to_string(),
-                    scope_id: None,
-                    rule_id: None,
+                    scope: None,
                     detail: None,
                 });
                 return out;
@@ -550,8 +661,7 @@ impl Schema {
                     severity: SchemaSeverity::Error,
                     code: "node_type_unknown".to_string(),
                     message: format!("node type '{t}' is not allowed"),
-                    scope_id: None,
-                    rule_id: None,
+                    scope: None,
                     detail: None,
                 });
             }
@@ -577,10 +687,10 @@ impl Schema {
                 continue;
             }
 
-            let (canonical, def) = if let Some(alias) = self.predicates.aliases.get(&key) {
-                (alias.as_str(), self.predicates.defs.get(alias))
+            let (canonical, def) = if let Some(alias) = self.aliases.get(&key) {
+                (alias.as_str(), self.predicates.get(alias))
             } else {
-                (key.as_str(), self.predicates.defs.get(&key))
+                (key.as_str(), self.predicates.get(&key))
             };
 
             let Some(def) = def else {
@@ -593,8 +703,7 @@ impl Schema {
                             key,
                             rel.as_str_lossy()
                         ),
-                        scope_id: None,
-                        rule_id: None,
+                        scope: None,
                         detail: None,
                     });
                 }
@@ -611,8 +720,7 @@ impl Schema {
                         "predicate '{}' not allowed for node type '{}'",
                         canonical, note_type
                     ),
-                    scope_id: None,
-                    rule_id: None,
+                    scope: None,
                     detail: None,
                 });
             }
@@ -628,6 +736,7 @@ impl Schema {
         };
 
         let scope = selection.scope;
+        let scope_id_str = selection.scope_id;
         if !scope.allows_kind_note() {
             return Vec::new();
         }
@@ -646,8 +755,7 @@ impl Schema {
                 severity: note_type_rule.severity.clone(),
                 code: "note_type_missing".to_string(),
                 message: format!("path '{rel_str}' requires a note type"),
-                scope_id: Some(scope.id.clone()),
-                rule_id: None,
+                scope: Some(scope_id_str.to_string()),
                 detail: None,
             }];
         }
@@ -673,8 +781,7 @@ impl Schema {
                         "path '{rel_str}' requires note type {:?}",
                         note_type_rule.allowed
                     ),
-                    scope_id: Some(scope.id.clone()),
-                    rule_id: None,
+                    scope: Some(scope_id_str.to_string()),
                     detail: None,
                 }];
             }
@@ -695,6 +802,7 @@ impl Schema {
         };
 
         let scope = selection.scope;
+        let scope_id_str = selection.scope_id;
         if !scope.allows_kind_note() {
             return Vec::new();
         }
@@ -740,8 +848,7 @@ impl Schema {
                     "path '{rel_str}' requires one of tags {:?} or types {:?}",
                     require_any.tags, require_any.types
                 ),
-                scope_id: Some(scope.id.clone()),
-                rule_id: None,
+                scope: Some(scope_id_str.to_string()),
                 detail: None,
             }];
         }
@@ -749,55 +856,65 @@ impl Schema {
         Vec::new()
     }
 
-    pub(crate) fn scope_for_path<'a>(&'a self, rel: &VaultPath) -> Option<&'a VaultScope> {
+    /// Find the scope definition (and its id) that matches a vault path.
+    pub(crate) fn scope_for_path<'a>(&'a self, rel: &VaultPath) -> Option<(&'a str, &'a ScopeDef)> {
         let rel_str = path_to_rel_string(rel.as_path());
-        self.scope_selection(&rel_str).map(|s| s.scope)
+        self.scope_selection(&rel_str)
+            .map(|s| (s.scope_id, s.scope))
     }
 
     fn scope_selection<'a>(&'a self, rel_str: &str) -> Option<ScopeSelection<'a>> {
-        let mut matches = Vec::new();
-        for scope in &self.vault.scopes {
-            if scope_matches(rel_str, &scope.path) {
-                matches.push(scope);
+        let mut matches: Vec<(&str, &ScopeDef, String)> = Vec::new();
+        for (id, scope) in &self.vault.scopes {
+            let scope_path = self.resolved_scope_path(id, scope).to_string();
+            if scope_matches(rel_str, &scope_path) {
+                matches.push((id.as_str(), scope, scope_path));
             }
         }
 
-        let scope = matches
+        let best_idx = matches
             .iter()
-            .max_by_key(|s| normalized_path(&s.path).len())
-            .copied()?;
+            .enumerate()
+            .max_by_key(|(_, (_, _, p))| normalized_path(p).len())
+            .map(|(i, _)| i)?;
 
-        let mut ancestors = matches
-            .into_iter()
-            .filter(|s| s.id != scope.id)
-            .collect::<Vec<_>>();
-        ancestors.sort_by_key(|s| normalized_path(&s.path).len());
+        let (scope_id, scope, scope_path) = matches.remove(best_idx);
 
-        Some(ScopeSelection { scope, ancestors })
+        let mut ancestors: Vec<(&str, &ScopeDef, String)> = matches;
+        ancestors.sort_by_key(|(_, _, p)| normalized_path(p).len());
+
+        Some(ScopeSelection {
+            scope_id,
+            scope,
+            scope_path,
+            ancestors,
+        })
     }
 }
 
 struct ScopeSelection<'a> {
-    scope: &'a VaultScope,
-    ancestors: Vec<&'a VaultScope>,
+    scope_id: &'a str,
+    scope: &'a ScopeDef,
+    scope_path: String,
+    ancestors: Vec<(&'a str, &'a ScopeDef, String)>,
 }
 
 impl<'a> ScopeSelection<'a> {
-    fn collect_allow(&self) -> Vec<&'a LayoutRule> {
-        let mut out = self.scope.allow.iter().collect::<Vec<_>>();
-        if self.scope.inherit_allow {
-            for ancestor in &self.ancestors {
-                out.extend(ancestor.allow.iter());
+    fn collect_allow(&self) -> Vec<LayoutRule> {
+        let mut out: Vec<LayoutRule> = self.scope.allow.iter().map(|e| e.as_rule()).collect();
+        if self.scope.inherit.contains(&InheritKind::Allow) {
+            for (_, ancestor, _) in &self.ancestors {
+                out.extend(ancestor.allow.iter().map(|e| e.as_rule()));
             }
         }
         out
     }
 
-    fn collect_deny(&self) -> Vec<&'a LayoutRule> {
-        let mut out = self.scope.deny.iter().collect::<Vec<_>>();
-        if self.scope.inherit_deny {
-            for ancestor in &self.ancestors {
-                out.extend(ancestor.deny.iter());
+    fn collect_deny(&self) -> Vec<LayoutRule> {
+        let mut out: Vec<LayoutRule> = self.scope.deny.iter().map(|e| e.as_rule()).collect();
+        if self.scope.inherit.contains(&InheritKind::Deny) {
+            for (_, ancestor, _) in &self.ancestors {
+                out.extend(ancestor.deny.iter().map(|e| e.as_rule()));
             }
         }
         out
@@ -807,10 +924,10 @@ impl<'a> ScopeSelection<'a> {
         if self.scope.notes.is_some() {
             return self.scope.notes.clone();
         }
-        if !self.scope.inherit_notes {
+        if !self.scope.inherit.contains(&InheritKind::Notes) {
             return None;
         }
-        for ancestor in self.ancestors.iter().rev() {
+        for (_, ancestor, _) in self.ancestors.iter().rev() {
             if ancestor.notes.is_some() {
                 return ancestor.notes.clone();
             }
@@ -819,7 +936,7 @@ impl<'a> ScopeSelection<'a> {
     }
 }
 
-impl VaultScope {
+impl ScopeDef {
     fn allows_kind(&self, vault: &Vault, rel: &Path) -> bool {
         if self.kinds.is_empty() {
             return true;
@@ -850,14 +967,7 @@ impl VaultScope {
 
 fn validate_rules(rules: &[LayoutRule], label: &str, scope_id: Option<&str>) -> Result<()> {
     for rule in rules {
-        let prefix = rule_validation_prefix(label, scope_id, &rule.id);
-        if rule.id.trim().is_empty() {
-            let context = match scope_id {
-                Some(scope_id) => format!("scope '{scope_id}' {label} rule"),
-                None => format!("vault {label} rule"),
-            };
-            return Err(Error::SchemaToml(format!("{context} id must not be empty")));
-        }
+        let prefix = rule_validation_prefix(label, scope_id);
         let mut count = 0;
         if rule.glob.as_ref().is_some_and(|s| !s.trim().is_empty()) {
             count += 1;
@@ -887,10 +997,10 @@ fn validate_rules(rules: &[LayoutRule], label: &str, scope_id: Option<&str>) -> 
     Ok(())
 }
 
-fn rule_validation_prefix(label: &str, scope_id: Option<&str>, rule_id: &str) -> String {
+fn rule_validation_prefix(label: &str, scope_id: Option<&str>) -> String {
     match scope_id {
-        Some(scope_id) => format!("scope '{scope_id}' {label} rule '{rule_id}'"),
-        None => format!("vault {label} rule '{rule_id}'"),
+        Some(scope_id) => format!("scope '{scope_id}' {label} rule"),
+        None => format!("vault {label} rule"),
     }
 }
 
@@ -920,15 +1030,14 @@ fn normalized_path(path: &str) -> String {
 fn layout_rule_violation(
     code: &str,
     rel_str: &str,
-    rule: &LayoutRule,
-    scope_id: Option<String>,
+    scope: Option<String>,
+    severity: SchemaSeverity,
 ) -> SchemaViolation {
     SchemaViolation {
-        severity: rule.severity.clone(),
+        severity,
         code: code.to_string(),
-        message: format!("path '{rel_str}' matched rule '{}'", rule.id),
-        scope_id,
-        rule_id: Some(rule.id.clone()),
+        message: format!("path '{rel_str}' matched a deny rule"),
+        scope,
         detail: None,
     }
 }
@@ -1448,5 +1557,402 @@ impl UnmatchedBehavior {
             UnmatchedBehavior::Warn => Some(SchemaSeverity::Warn),
             UnmatchedBehavior::Error => Some(SchemaSeverity::Error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_types_as_flat_map() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Ideas, techniques, terms."
+doc = "Notes, docs, pages, specs."
+
+[vault]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        assert_eq!(schema.types.len(), 2);
+        assert_eq!(
+            schema.types.get("concept").map(String::as_str),
+            Some("Ideas, techniques, terms.")
+        );
+        assert_eq!(
+            schema.types.get("doc").map(String::as_str),
+            Some("Notes, docs, pages, specs.")
+        );
+    }
+
+    #[test]
+    fn parse_aliases_at_top_level() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[aliases]
+requires = "depends_on"
+ref = "references"
+
+[predicates.depends_on]
+description = "A requires B."
+domain = ["concept"]
+
+[vault]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        assert_eq!(
+            schema.aliases.get("requires").map(String::as_str),
+            Some("depends_on")
+        );
+        assert_eq!(
+            schema.aliases.get("ref").map(String::as_str),
+            Some("references")
+        );
+    }
+
+    #[test]
+    fn parse_scopes_as_map() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.projects]
+required = true
+description = "Projects"
+unmatched = "warn"
+
+[vault.scopes.kg_concepts]
+path = "kg/concepts"
+required = true
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        assert_eq!(schema.vault.scopes.len(), 2);
+
+        let projects = schema.vault.scopes.get("projects").expect("projects scope");
+        assert!(projects.path.is_none());
+        assert!(projects.required);
+        assert_eq!(projects.description.as_deref(), Some("Projects"));
+        assert_eq!(projects.unmatched, UnmatchedBehavior::Warn);
+
+        let kg = schema.vault.scopes.get("kg_concepts").expect("kg scope");
+        assert_eq!(kg.path.as_deref(), Some("kg/concepts"));
+    }
+
+    #[test]
+    fn scope_path_defaults_to_id() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.people]
+required = true
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("people").expect("people scope");
+        assert!(scope.path.is_none());
+        assert_eq!(schema.resolved_scope_path("people", scope), "people");
+    }
+
+    #[test]
+    fn scope_path_explicit_override() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.kg_concepts]
+path = "kg/concepts"
+required = true
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("kg_concepts").expect("kg scope");
+        assert_eq!(
+            schema.resolved_scope_path("kg_concepts", scope),
+            "kg/concepts"
+        );
+    }
+
+    #[test]
+    fn parse_string_shorthand_allow_rules() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.notes]
+required = true
+allow = ["**/*.md", "**/*.canvas"]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("notes").expect("notes scope");
+        assert_eq!(scope.allow.len(), 2);
+        let rule0 = scope.allow[0].as_rule();
+        assert_eq!(rule0.glob.as_deref(), Some("**/*.md"));
+        let rule1 = scope.allow[1].as_rule();
+        assert_eq!(rule1.glob.as_deref(), Some("**/*.canvas"));
+    }
+
+    #[test]
+    fn parse_full_rule_in_allow() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.journal]
+required = true
+allow = [{ template = "{year}/{month}/{day}/{slug}.md", severity = "error" }]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("journal").expect("journal scope");
+        assert_eq!(scope.allow.len(), 1);
+        let rule = scope.allow[0].as_rule();
+        assert_eq!(
+            rule.template.as_deref(),
+            Some("{year}/{month}/{day}/{slug}.md")
+        );
+        assert_eq!(rule.severity, SchemaSeverity::Error);
+    }
+
+    #[test]
+    fn duplicate_resolved_scope_paths_are_rejected() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.people]
+required = true
+
+[vault.scopes.team]
+path = "people"
+required = true
+"#;
+        let err = Schema::from_toml_str(input).expect_err("duplicate scope path should fail");
+        assert!(
+            err.to_string()
+                .contains("resolved path 'people' is duplicated")
+        );
+    }
+
+    #[test]
+    fn parse_mixed_allow_rules() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.notes]
+required = true
+allow = [
+    "**/*.md",
+    { glob = "**/*.canvas", severity = "error" },
+    { template = "{year}/{slug}.md" },
+]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("notes").expect("notes scope");
+        assert_eq!(scope.allow.len(), 3);
+    }
+
+    #[test]
+    fn parse_inherit_as_list() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.parent]
+required = true
+allow = ["**/*.md"]
+
+[vault.scopes.child]
+path = "parent/child"
+required = true
+inherit = ["allow", "notes"]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let child = schema.vault.scopes.get("child").expect("child scope");
+        assert!(child.inherit.contains(&InheritKind::Allow));
+        assert!(child.inherit.contains(&InheritKind::Notes));
+        assert!(!child.inherit.contains(&InheritKind::Deny));
+    }
+
+    #[test]
+    fn parse_orphans_field() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.assets]
+path = "memory/assets"
+required = true
+kinds = ["attachment"]
+orphans = "warn"
+allow = ["**/*"]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("assets").expect("assets scope");
+        assert_eq!(scope.orphans, Some(SchemaSeverity::Warn));
+    }
+
+    #[test]
+    fn parse_unmatched_field() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault]
+unscoped = "allow"
+
+[vault.scopes.notes]
+required = true
+unmatched = "error"
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("notes").expect("notes scope");
+        assert_eq!(scope.unmatched, UnmatchedBehavior::Error);
+    }
+
+    #[test]
+    fn parse_resolve_field() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault]
+resolve = "most_specific"
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        assert_eq!(schema.vault.resolve, ScopeResolution::MostSpecific);
+    }
+
+    #[test]
+    fn skip_defaults_in_serialized_output() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[vault.scopes.notes]
+required = true
+allow = ["**/*.md"]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let output = toml::to_string_pretty(&schema).expect("serialize");
+
+        // Defaults should not appear in output
+        assert!(!output.contains("inherit"));
+        assert!(!output.contains("extensions"));
+        assert!(!output.contains("kinds"));
+        assert!(!output.contains("orphans"));
+        assert!(!output.contains("deny"));
+    }
+
+    #[test]
+    fn roundtrip_preserves_semantics() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+doc = "Documents"
+
+[aliases]
+requires = "depends_on"
+
+[predicates.depends_on]
+description = "A requires B."
+domain = ["concept"]
+severity = "error"
+
+[vault]
+unscoped = "allow"
+
+[vault.scopes.notes]
+required = true
+description = "All notes"
+unmatched = "warn"
+allow = ["**/*.md"]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let serialized = toml::to_string_pretty(&schema).expect("serialize");
+        let reparsed = Schema::from_toml_str(&serialized).expect("reparse");
+        assert_eq!(schema.types, reparsed.types);
+        assert_eq!(schema.aliases, reparsed.aliases);
+        assert_eq!(schema.vault.scopes.len(), reparsed.vault.scopes.len());
+    }
+
+    #[test]
+    fn predicate_defaults_skipped_in_output() {
+        let input = r#"
+version = 1
+
+[types]
+concept = "Concepts"
+
+[predicates.related_to]
+description = "Loose association."
+domain = ["*"]
+
+[vault]
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let output = toml::to_string_pretty(&schema).expect("serialize");
+
+        // symmetric = false (default) should not appear
+        assert!(!output.contains("symmetric"));
+        // severity = "warn" (default) should not appear
+        assert!(!output.contains("severity"));
+    }
+
+    #[test]
+    fn scope_notes_inline() {
+        let input = r#"
+version = 1
+
+[types]
+journal = "Journal entries"
+
+[vault.scopes.journal]
+path = "journal"
+required = true
+allow = [{ template = "{year}/{month}/{day}.md" }]
+
+[vault.scopes.journal.notes.type]
+required = true
+allowed = ["journal"]
+severity = "error"
+"#;
+        let schema = Schema::from_toml_str(input).expect("parse schema");
+        let scope = schema.vault.scopes.get("journal").expect("journal scope");
+        let notes = scope.notes.as_ref().expect("notes present");
+        let note_type = notes.r#type.as_ref().expect("type present");
+        assert!(note_type.required);
+        assert_eq!(note_type.allowed, vec!["journal"]);
+        assert_eq!(note_type.severity, SchemaSeverity::Error);
     }
 }
